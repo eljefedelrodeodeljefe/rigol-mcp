@@ -1,0 +1,22 @@
+[package]
+name = "rigol-mcp"
+description = "MCP server for RIGOL test instruments (DP800-series bench PSUs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rigol-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rigol = { workspace = true }
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1.0"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

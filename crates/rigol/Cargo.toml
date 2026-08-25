@@ -1,0 +1,16 @@
+[package]
+name = "rigol"
+description = "Client-side control of RIGOL test instruments over SCPI (raw TCP socket)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
