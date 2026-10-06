@@ -14,13 +14,13 @@
 
 pub mod dp800;
 pub mod error;
+pub mod idn;
 pub mod limits;
 pub mod scpi;
 
-pub use dp800::{
-    Channel, Dp800, Identity, LanConfig, Measurement, OutputState, Protection, Rating,
-};
+pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
 pub use error::{Error, Result};
+pub use idn::{Family, Identity};
 pub use limits::Limits;
 pub use scpi::{
     DEFAULT_MAX_BLOCK_BYTES, DEFAULT_PORT, DEFAULT_TIMEOUT, InstrumentError, Session, SessionConfig,

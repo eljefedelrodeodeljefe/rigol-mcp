@@ -7,29 +7,10 @@
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+use crate::idn::Family;
+pub use crate::idn::Identity;
 use crate::limits::Limits;
 use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
-
-/// `*IDN?` split into its four documented fields.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Identity {
-    pub vendor: String,
-    pub model: String,
-    pub serial: String,
-    pub firmware: String,
-}
-
-impl Identity {
-    pub fn parse(raw: &str) -> Option<Self> {
-        let mut parts = raw.split(',').map(str::trim);
-        Some(Self {
-            vendor: parts.next()?.to_string(),
-            model: parts.next()?.to_string(),
-            serial: parts.next()?.to_string(),
-            firmware: parts.next()?.to_string(),
-        })
-    }
-}
 
 /// What a channel is physically capable of, e.g. 30 V / 3 A.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -198,6 +179,14 @@ impl Dp800 {
             cmd: "*IDN?".into(),
             reply: raw.clone(),
         })?;
+        // Before any DP800 command: another family's firmware would ignore
+        // them, and an ignored query is a hung one.
+        if identity.family() != Some(Family::Dp800) {
+            return Err(Error::WrongInstrument {
+                expected: Family::Dp800,
+                model: identity.model,
+            });
+        }
 
         // Backfill ceilings from ratings before anything can be written.
         let mut ratings = Vec::new();

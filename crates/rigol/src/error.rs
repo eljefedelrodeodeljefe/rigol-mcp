@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::idn::Family;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +30,11 @@ pub enum Error {
 
     #[error("could not parse the reply to `{cmd}`: {reply:?}")]
     Parse { cmd: String, reply: String },
+
+    /// The instrument that answered is not the family it was opened as.
+    /// Raised before any family-specific command is sent.
+    #[error("expected a {expected} instrument, but `{model}` answered")]
+    WrongInstrument { expected: Family, model: String },
 
     #[error("channel {0} does not exist (this instrument has channels 1-3)")]
     NoSuchChannel(u8),
