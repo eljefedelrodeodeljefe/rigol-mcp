@@ -39,6 +39,9 @@ pub enum Error {
     #[error("channel {0} does not exist (this instrument has channels 1-3)")]
     NoSuchChannel(u8),
 
+    #[error("channel {channel} does not exist (this instrument has channels 1-{count})")]
+    NoSuchInput { channel: u8, count: u8 },
+
     /// The safety ceiling. Enforced here in the library, below the MCP layer,
     /// so no tool argument can route around it.
     #[error(

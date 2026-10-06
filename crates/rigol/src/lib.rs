@@ -12,12 +12,17 @@
 //! but the raw socket is a line protocol with identical capability and none of
 //! the XDR machinery.
 
+pub mod dho900;
 pub mod dp800;
 pub mod error;
 pub mod idn;
 pub mod limits;
 pub mod scpi;
 
+pub use dho900::{
+    Bucket, ChannelState, Coupling, Dho900, MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus,
+    Waveform, WaveformStats,
+};
 pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
 pub use error::{Error, Result};
 pub use idn::{Family, Identity};
