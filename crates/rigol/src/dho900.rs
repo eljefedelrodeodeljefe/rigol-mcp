@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape, plan};
 use crate::idn::{Family, Identity};
 use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 
@@ -246,6 +247,21 @@ pub struct EdgeTrigger {
     pub sweep: String,
 }
 
+/// The signal generator as the scope reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GeneratorState {
+    pub output_on: bool,
+    /// `None` for an arbitrary waveform, which this crate does not configure.
+    pub shape: Option<Waveshape>,
+    pub frequency_hz: f64,
+    pub amplitude_vpp: f64,
+    pub offset_volts: f64,
+    /// Furthest excursion from 0 V the current settings produce.
+    pub peak_volts: Option<f64>,
+    /// The ceilings any change or output-on is checked against.
+    pub limits: GeneratorLimits,
+}
+
 /// One analog channel's vertical setup.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChannelState {
@@ -457,6 +473,7 @@ pub struct Dho900 {
     session: Session,
     identity: Identity,
     channels: u8,
+    generator_limits: GeneratorLimits,
 }
 
 impl Dho900 {
@@ -490,7 +507,18 @@ impl Dho900 {
             session,
             identity,
             channels,
+            generator_limits: GeneratorLimits::default(),
         })
+    }
+
+    /// Tightens the signal generator's ceilings below the hardware range.
+    pub fn with_generator_limits(mut self, limits: GeneratorLimits) -> Self {
+        self.generator_limits = limits;
+        self
+    }
+
+    pub fn generator_limits(&self) -> GeneratorLimits {
+        self.generator_limits
     }
 
     pub fn identity(&self) -> &Identity {
@@ -779,6 +807,99 @@ impl Dho900 {
                 sweep: self.text(":TRIGger:SWEep?").await?,
             },
             instrument_errors: self.errors().await?,
+        })
+    }
+
+    // ── Signal generator ─────────────────────────────────────────────────────
+    //
+    // Unlike everything above, this reaches the device under test. See the
+    // generator module for the rules.
+
+    pub async fn generator(&self) -> Result<GeneratorState> {
+        let shape = Waveshape::parse(&self.text(":SOURce:FUNCtion?").await?);
+        let frequency_hz = self.number(":SOURce:FREQuency?").await?;
+        let amplitude_vpp = self.number(":SOURce:VOLTage:AMPLitude?").await?;
+        let offset_volts = self.number(":SOURce:VOLTage:OFFSet?").await?;
+        let peak_volts = shape.map(|shape| {
+            Signal {
+                shape,
+                frequency_hz,
+                amplitude_vpp,
+                offset_volts,
+            }
+            .peak_volts()
+        });
+        Ok(GeneratorState {
+            output_on: self.flag(":SOURce:OUTPut:STATe?").await?,
+            shape,
+            frequency_hz,
+            amplitude_vpp,
+            offset_volts,
+            peak_volts,
+            limits: self.generator_limits,
+        })
+    }
+
+    /// Changes waveform, frequency, amplitude and/or offset. Never turns the
+    /// output on. The resulting signal is checked against the ceilings
+    /// before anything is sent, and the commands go out in an order that
+    /// keeps every intermediate state inside them too.
+    pub async fn configure_generator(
+        &self,
+        cfg: &GeneratorConfig,
+    ) -> Result<Applied<GeneratorState>> {
+        let current = self.current_signal().await?;
+        let target = cfg.apply_to(&current);
+        let changes = plan(&current, &target, &self.generator_limits)?;
+
+        self.session.clear_status().await?;
+        for change in &changes {
+            self.session.command(&change.scpi()).await?;
+        }
+        Ok(Applied {
+            state: self.generator().await?,
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    /// Turns the output on, after checking the settings it would put out.
+    /// They may have changed on the front panel since they were configured.
+    pub async fn generator_output_on(&self) -> Result<GeneratorState> {
+        let current = self.current_signal().await?;
+        self.generator_limits.check(&current)?;
+        self.session.command(":SOURce:OUTPut:STATe ON").await?;
+        let state = self.generator().await?;
+        tracing::info!(
+            shape = ?state.shape,
+            frequency_hz = state.frequency_hz,
+            amplitude_vpp = state.amplitude_vpp,
+            offset_volts = state.offset_volts,
+            peak_volts = ?state.peak_volts,
+            "signal generator output ON"
+        );
+        Ok(state)
+    }
+
+    pub async fn generator_output_off(&self) -> Result<GeneratorState> {
+        self.session.command(":SOURce:OUTPut:STATe OFF").await?;
+        tracing::info!("signal generator output off");
+        self.generator().await
+    }
+
+    /// The generator's signal now. An arbitrary waveform cannot be checked
+    /// against the ceilings, so it is refused rather than guessed at.
+    async fn current_signal(&self) -> Result<Signal> {
+        let cmd = ":SOURce:FUNCtion?";
+        let raw = self.text(cmd).await?;
+        let shape = Waveshape::parse(&raw).ok_or_else(|| Error::Parse {
+            cmd: cmd.into(),
+            reply: raw,
+        })?;
+        Ok(Signal {
+            shape,
+            frequency_hz: self.number(":SOURce:FREQuency?").await?,
+            amplitude_vpp: self.number(":SOURce:VOLTage:AMPLitude?").await?,
+            offset_volts: self.number(":SOURce:VOLTage:OFFSet?").await?,
         })
     }
 

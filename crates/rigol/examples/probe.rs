@@ -86,6 +86,11 @@ const SCOPE_QUERIES: &[&str] = &[
     ":WAVeform:FORMat?",
     ":WAVeform:POINts?",
     ":WAVeform:PREamble?",
+    ":SOURce:OUTPut:STATe?",
+    ":SOURce:FUNCtion?",
+    ":SOURce:FREQuency?",
+    ":SOURce:VOLTage:AMPLitude?",
+    ":SOURce:VOLTage:OFFSet?",
 ];
 
 async fn probe_scope(

@@ -15,17 +15,19 @@
 pub mod dho900;
 pub mod dp800;
 pub mod error;
+pub mod generator;
 pub mod idn;
 pub mod limits;
 pub mod scpi;
 
 pub use dho900::{
     Applied, Bucket, ChannelConfig, ChannelState, Coupling, Dho900, EdgeTrigger, EdgeTriggerConfig,
-    MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus, Slope, Sweep, Timebase, Waveform,
-    WaveformStats,
+    GeneratorState, MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus, Slope, Sweep, Timebase,
+    Waveform, WaveformStats,
 };
 pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
 pub use error::{Error, Result};
+pub use generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape};
 pub use idn::{Family, Identity};
 pub use limits::Limits;
 pub use scpi::{
