@@ -10,9 +10,9 @@ use rmcp::model::{ErrorCode, ErrorData};
 pub fn tool_error(e: anyhow::Error) -> ErrorData {
     if let Some(err) = e.downcast_ref::<rigol::Error>() {
         let code = match err {
-            rigol::Error::LimitExceeded { .. } | rigol::Error::NoSuchChannel(_) => {
-                ErrorCode::INVALID_PARAMS
-            }
+            rigol::Error::LimitExceeded { .. }
+            | rigol::Error::NoSuchChannel(_)
+            | rigol::Error::NoSuchInput { .. } => ErrorCode::INVALID_PARAMS,
             // Misconfiguration, not a malfunction: RIGOL_FAMILY names one kind
             // of instrument and another one answered at RIGOL_HOST.
             rigol::Error::WrongInstrument { .. } => ErrorCode::INVALID_REQUEST,

@@ -493,6 +493,7 @@ name = "rigol-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "rigol",
  "rigol-fake",
  "rmcp",

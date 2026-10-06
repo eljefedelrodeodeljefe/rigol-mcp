@@ -455,6 +455,11 @@ impl Dho900 {
         })
     }
 
+    /// One automatic measurement.
+    ///
+    /// Not a pure read on this firmware: like choosing the item on the front
+    /// panel, the query also adds it to the scope's on-screen measurement
+    /// list. The Programming Guide does not say so; a screenshot does.
     pub async fn measure(&self, item: MeasureItem, channel: u8) -> Result<Reading> {
         self.check_channel(channel)?;
         let cmd = format!(":MEASure:ITEM? {},CHANnel{channel}", item.scpi());
