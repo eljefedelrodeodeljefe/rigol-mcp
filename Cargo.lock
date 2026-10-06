@@ -473,6 +473,7 @@ name = "rigol"
 version = "0.1.0"
 dependencies = [
  "rigol-fake",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
