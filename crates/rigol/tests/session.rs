@@ -27,6 +27,30 @@ async fn query_reads_one_line() {
     fake.finish();
 }
 
+/// Commands and queries interleave on one socket, including several
+/// commands landing in the instrument's buffer at once.
+#[tokio::test]
+async fn commands_and_queries_interleave() {
+    let mut script = Vec::new();
+    for _ in 0..20 {
+        script.push(step(":TRIGger:SWEep?", Reply::line("AUTO")));
+        script.push(step("*CLS", Reply::None));
+    }
+    script.push(step("*IDN?", Reply::line("RIGOL,DHO924S,X,1")));
+    let fake = Fake::start(script).await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    for _ in 0..20 {
+        assert_eq!(s.query(":TRIGger:SWEep?").await.unwrap(), "AUTO");
+        s.clear_status().await.unwrap();
+    }
+    // A final query, so the fake has read every command before finish().
+    s.query("*IDN?").await.unwrap();
+
+    assert_eq!(fake.connections(), 1);
+    fake.finish();
+}
+
 /// The reply to a timed-out query can still arrive. Read on the same socket,
 /// it would be taken as the answer to the *next* query, and every reply after
 /// it would be off by one. The session must reconnect instead.

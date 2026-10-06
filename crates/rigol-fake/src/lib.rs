@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedWriteHalf;
 
@@ -88,26 +88,37 @@ impl Fake {
                 shared.lock().unwrap().connections += 1;
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    let (read, mut write) = stream.into_split();
-                    let mut lines = BufReader::new(read).lines();
-                    while let Ok(Some(cmd)) = lines.next_line().await {
-                        let next = {
-                            let mut st = shared.lock().unwrap();
-                            match st.script.front() {
-                                Some(s) if s.expect == cmd => st.script.pop_front(),
-                                Some(s) => {
-                                    let msg = format!("expected `{}`, got `{cmd}`", s.expect);
-                                    st.failures.push(msg);
-                                    None
-                                }
-                                None => {
-                                    st.failures.push(format!("unscripted command `{cmd}`"));
-                                    None
-                                }
-                            }
+                    let (mut read, mut write) = stream.into_split();
+                    let mut pending: Vec<u8> = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match read.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
                         };
-                        if let Some(step) = next {
-                            respond(&mut write, step.reply).await;
+                        pending.extend_from_slice(&buf[..n]);
+                        // One read can carry several commands; answer each.
+                        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+                            let line: Vec<u8> = pending.drain(..=pos).collect();
+                            let cmd = String::from_utf8_lossy(&line).trim_end().to_string();
+                            let next = {
+                                let mut st = shared.lock().unwrap();
+                                match st.script.front() {
+                                    Some(s) if s.expect == cmd => st.script.pop_front(),
+                                    Some(s) => {
+                                        let msg = format!("expected `{}`, got `{cmd}`", s.expect);
+                                        st.failures.push(msg);
+                                        None
+                                    }
+                                    None => {
+                                        st.failures.push(format!("unscripted command `{cmd}`"));
+                                        None
+                                    }
+                                }
+                            };
+                            if let Some(step) = next {
+                                respond(&mut write, step.reply).await;
+                            }
                         }
                     }
                 });
