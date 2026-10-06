@@ -1,8 +1,24 @@
 name: Release
 
 on:
+  # A release published by a person. Releases created by release-please do NOT fire
+  # this: events from GITHUB_TOKEN start no workflows. release-please.yml calls this
+  # workflow directly instead.
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build and attach assets to"
+        type: string
+        required: true
+  # Backfill assets for an existing release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach assets to"
+        type: string
+        required: true
 
 permissions:
   contents: write
@@ -33,6 +49,8 @@ jobs:
             os: macos-14
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -43,14 +61,14 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          staging="rigol-mcp-${{ github.event.release.tag_name }}-${{ matrix.target }}"
+          staging="rigol-mcp-${{ inputs.tag || github.event.release.tag_name }}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp target/${{ matrix.target }}/release/rigol-mcp LICENSE README.md "$staging/"
           tar -czf "dist/$staging.tar.gz" "$staging"
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.tar.gz --clobber
+        run: gh release upload "${{ inputs.tag || github.event.release.tag_name }}" dist/*.tar.gz --clobber
 
   # SBOM for the released version, attached to the release as a durable asset.
   # Informational: a finding must never block a release that has already been published —
@@ -63,4 +81,4 @@ jobs:
       contents: write
     with:
       mode: informational
-      upload-to-release: ${{ github.event.release.tag_name }}
+      upload-to-release: ${{ inputs.tag || github.event.release.tag_name }}
