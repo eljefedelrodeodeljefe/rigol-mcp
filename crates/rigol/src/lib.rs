@@ -20,8 +20,9 @@ pub mod limits;
 pub mod scpi;
 
 pub use dho900::{
-    Bucket, ChannelState, Coupling, Dho900, MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus,
-    Waveform, WaveformStats,
+    Applied, Bucket, ChannelConfig, ChannelState, Coupling, Dho900, EdgeTrigger, EdgeTriggerConfig,
+    MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus, Slope, Sweep, Timebase, Waveform,
+    WaveformStats,
 };
 pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
 pub use error::{Error, Result};

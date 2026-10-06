@@ -1,7 +1,10 @@
 //! The DHO900 model against a scripted fake instrument, using replies
 //! captured from a DHO924S on firmware 00.01.05.
 
-use rigol::{Coupling, Dho900, Error, Family, MeasureItem, SessionConfig};
+use rigol::{
+    ChannelConfig, Coupling, Dho900, EdgeTriggerConfig, Error, Family, MeasureItem, SessionConfig,
+    Slope, Sweep,
+};
 use rigol_fake::{Fake, Reply, Step, step};
 
 const IDN: &str = "RIGOL TECHNOLOGIES,DHO924S,DHO9S000000001,00.01.05";
@@ -171,5 +174,188 @@ async fn reads_and_scales_a_waveform() {
     assert!(stats.min.abs() < 1e-9, "{stats:?}");
     assert!((stats.max - 9.0 * 6.6667e-6).abs() < 1e-9, "{stats:?}");
     assert_eq!(stats.start_seconds, -2.5e-4);
+    fake.finish();
+}
+
+// ── Writes ───────────────────────────────────────────────────────────────────
+
+fn channel1_readback() -> Vec<Step> {
+    vec![
+        step(":CHANnel1:DISPlay?", Reply::line("1")),
+        step(":CHANnel1:SCALe?", Reply::line("1.000000E-01")),
+        step(":CHANnel1:OFFSet?", Reply::line("0.000000")),
+        step(":CHANnel1:COUPling?", Reply::line("AC")),
+        step(":CHANnel1:PROBe?", Reply::line("10")),
+        step(":CHANnel1:BWLimit?", Reply::line("OFF")),
+        step(":CHANnel1:INVert?", Reply::line("0")),
+    ]
+}
+
+/// A refused setting sends nothing: the fake fails on any command at all.
+#[tokio::test]
+async fn an_impossible_probe_ratio_is_refused_before_sending() {
+    let (fake, scope) = connect(vec![]).await;
+
+    let err = scope
+        .configure_channel(
+            1,
+            &ChannelConfig {
+                probe_ratio: Some(3.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::OutOfRange {
+                what: "probe ratio",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_scale_beyond_the_probe_adjusted_range_is_refused() {
+    // 10x probe: 2 mV/div to 100 V/div on a DHO900.
+    let (fake, scope) = connect(vec![step(":CHANnel1:PROBe?", Reply::line("10"))]).await;
+
+    let too_fine = scope
+        .configure_channel(
+            1,
+            &ChannelConfig {
+                volts_per_div: Some(0.001),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(too_fine, Error::OutOfRange { .. }), "{too_fine:?}");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_channel_change_reports_what_the_scope_holds() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":CHANnel1:PROBe 10", Reply::None),
+        step(":CHANnel1:COUPling AC", Reply::None),
+        step(":CHANnel1:SCALe 0.1", Reply::None),
+    ];
+    script.extend(channel1_readback());
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_channel(
+            1,
+            &ChannelConfig {
+                probe_ratio: Some(10.0),
+                coupling: Some(Coupling::Ac),
+                volts_per_div: Some(0.1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(applied.state.probe_ratio, 10.0);
+    assert_eq!(applied.state.coupling, Some(Coupling::Ac));
+    assert!(applied.instrument_errors.is_empty());
+    fake.finish();
+}
+
+/// Where the limit depends on other settings, the scope decides; its
+/// objection comes back alongside the state it kept.
+#[tokio::test]
+async fn an_offset_the_scope_rejects_comes_back_as_an_instrument_error() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":CHANnel1:OFFSet 50", Reply::None),
+    ];
+    script.extend(channel1_readback());
+    script.push(step(
+        ":SYST:ERR?",
+        Reply::line(r#"-222,"Data out of range""#),
+    ));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_channel(
+            1,
+            &ChannelConfig {
+                offset_volts: Some(50.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(applied.state.offset_volts, 0.0);
+    assert_eq!(applied.instrument_errors.len(), 1);
+    assert_eq!(applied.instrument_errors[0].code, -222);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn an_edge_trigger_change_uses_guide_spellings() {
+    let (fake, scope) = connect(vec![
+        step("*CLS", Reply::None),
+        step(":TRIGger:MODE EDGE", Reply::None),
+        step(":TRIGger:EDGE:SOURce CHANnel2", Reply::None),
+        step(":TRIGger:EDGE:SLOPe NEGative", Reply::None),
+        step(":TRIGger:EDGE:LEVel 1.5", Reply::None),
+        step(":TRIGger:SWEep SINGle", Reply::None),
+        step(":TRIGger:MODE?", Reply::line("EDGE")),
+        step(":TRIGger:EDGE:SOURce?", Reply::line("CHAN2")),
+        step(":TRIGger:EDGE:SLOPe?", Reply::line("NEG")),
+        step(":TRIGger:EDGE:LEVel?", Reply::line("1.500000E+00")),
+        step(":TRIGger:SWEep?", Reply::line("SING")),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
+    ])
+    .await;
+
+    let applied = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            channel: Some(2),
+            slope: Some(Slope::Falling),
+            level_volts: Some(1.5),
+            sweep: Some(Sweep::Single),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(applied.state.source, "CHAN2");
+    assert_eq!(applied.state.level_volts, 1.5);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn acquisition_control_uses_guide_spellings() {
+    let (fake, scope) = connect(vec![
+        step(":RUN", Reply::None),
+        step(":STOP", Reply::None),
+        step(":SINGle", Reply::None),
+        step(":AUToset", Reply::None),
+        step(":MEASure:CLEar", Reply::None),
+        step("*IDN?", Reply::line(IDN)),
+    ])
+    .await;
+
+    scope.run().await.unwrap();
+    scope.stop().await.unwrap();
+    scope.single().await.unwrap();
+    scope.autoset().await.unwrap();
+    scope.clear_measurements().await.unwrap();
+    // A query, so the fake has seen every command before finish().
+    scope.session().query("*IDN?").await.unwrap();
+
     fake.finish();
 }

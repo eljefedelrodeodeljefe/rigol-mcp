@@ -129,6 +129,14 @@ pub enum Coupling {
 }
 
 impl Coupling {
+    fn scpi(self) -> &'static str {
+        match self {
+            Self::Dc => "DC",
+            Self::Ac => "AC",
+            Self::Gnd => "GND",
+        }
+    }
+
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_uppercase().as_str() {
             "DC" => Some(Self::Dc),
@@ -137,6 +145,105 @@ impl Coupling {
             _ => None,
         }
     }
+}
+
+/// Which edge the trigger fires on (`:TRIGger:EDGE:SLOPe`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Slope {
+    Rising,
+    Falling,
+    Either,
+}
+
+impl Slope {
+    fn scpi(self) -> &'static str {
+        match self {
+            Self::Rising => "POSitive",
+            Self::Falling => "NEGative",
+            Self::Either => "RFALl",
+        }
+    }
+}
+
+/// When the scope acquires (`:TRIGger:SWEep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Sweep {
+    /// Free-runs when no trigger arrives.
+    Auto,
+    /// Acquires only on a trigger.
+    Normal,
+    /// Acquires once on the next trigger, then stops.
+    Single,
+}
+
+impl Sweep {
+    fn scpi(self) -> &'static str {
+        match self {
+            Self::Auto => "AUTO",
+            Self::Normal => "NORMal",
+            Self::Single => "SINGle",
+        }
+    }
+}
+
+/// Probe attenuation ratios the scope accepts (`:CHANnel<n>:PROBe`).
+const PROBE_RATIOS: &[f64] = &[
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
+    200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0,
+];
+
+/// Changes to one channel's vertical setup. `None` leaves a setting alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelConfig {
+    pub displayed: Option<bool>,
+    pub volts_per_div: Option<f64>,
+    pub offset_volts: Option<f64>,
+    pub coupling: Option<Coupling>,
+    pub probe_ratio: Option<f64>,
+}
+
+/// Changes to the edge trigger. `None` leaves a setting alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EdgeTriggerConfig {
+    /// Analog channel the trigger watches.
+    pub channel: Option<u8>,
+    pub slope: Option<Slope>,
+    pub level_volts: Option<f64>,
+    pub sweep: Option<Sweep>,
+}
+
+/// The state an instrument holds after a write, and anything it objected to.
+///
+/// Read back rather than echoed: where a limit depends on other settings
+/// (an offset on the scale, a timebase on the bandwidth), the instrument
+/// decides, and this reports what it decided.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Applied<T> {
+    pub state: T,
+    /// Errors the instrument raised while applying the change. Empty when it
+    /// accepted everything.
+    pub instrument_errors: Vec<InstrumentError>,
+}
+
+/// Timebase after a change.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Timebase {
+    pub seconds_per_div: f64,
+    pub offset_seconds: f64,
+}
+
+/// Edge trigger after a change.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EdgeTrigger {
+    pub mode: String,
+    pub source: String,
+    pub slope: String,
+    pub level_volts: f64,
+    pub sweep: String,
 }
 
 /// One analog channel's vertical setup.
@@ -503,6 +610,188 @@ impl Dho900 {
         Waveform::decode(channel, preamble, &data)
     }
 
+    // ── Writes ───────────────────────────────────────────────────────────────
+    //
+    // None of these reach the device under test: they change what the scope
+    // shows and when it acquires. The signal generator, which does drive the
+    // device under test, is gated separately.
+
+    /// Starts acquiring (`:RUN`).
+    pub async fn run(&self) -> Result<()> {
+        self.session.command(":RUN").await
+    }
+
+    /// Stops acquiring (`:STOP`).
+    pub async fn stop(&self) -> Result<()> {
+        self.session.command(":STOP").await
+    }
+
+    /// Arms a single acquisition on the next trigger (`:SINGle`).
+    pub async fn single(&self) -> Result<()> {
+        self.session.command(":SINGle").await
+    }
+
+    /// Lets the scope pick scale, timebase and trigger for the signal
+    /// (`:AUToset`).
+    pub async fn autoset(&self) -> Result<()> {
+        self.session.command(":AUToset").await
+    }
+
+    /// Removes every measurement from the on-screen list
+    /// (`:MEASure:CLEar`), including ones added by [`Dho900::measure`].
+    pub async fn clear_measurements(&self) -> Result<()> {
+        self.session.command(":MEASure:CLEar").await
+    }
+
+    pub async fn configure_channel(
+        &self,
+        channel: u8,
+        cfg: &ChannelConfig,
+    ) -> Result<Applied<ChannelState>> {
+        self.check_channel(channel)?;
+        if let Some(p) = cfg.probe_ratio
+            && !PROBE_RATIOS.contains(&p)
+        {
+            return Err(Error::OutOfRange {
+                what: "probe ratio",
+                value: p,
+                allowed: "one of 0.001, 0.002, 0.005 … 1, 2, 5, 10 … 50000".into(),
+            });
+        }
+        if let Some(scale) = cfg.volts_per_div {
+            let probe = match cfg.probe_ratio {
+                Some(p) => p,
+                None => self.number(&format!(":CHANnel{channel}:PROBe?")).await?,
+            };
+            let (min, max) = (self.min_volts_per_div() * probe, 10.0 * probe);
+            if !(min..=max).contains(&scale) {
+                return Err(Error::OutOfRange {
+                    what: "vertical scale (V/div)",
+                    value: scale,
+                    allowed: format!("{min} to {max} at a {probe}x probe ratio"),
+                });
+            }
+        }
+        check_finite("offset (V)", cfg.offset_volts)?;
+
+        let c = format!(":CHANnel{channel}");
+        self.session.clear_status().await?;
+        // Probe first: it changes the meaning of scale and offset.
+        if let Some(p) = cfg.probe_ratio {
+            self.session.command(&format!("{c}:PROBe {p}")).await?;
+        }
+        if let Some(on) = cfg.displayed {
+            self.session
+                .command(&format!("{c}:DISPlay {}", u8::from(on)))
+                .await?;
+        }
+        if let Some(cp) = cfg.coupling {
+            self.session
+                .command(&format!("{c}:COUPling {}", cp.scpi()))
+                .await?;
+        }
+        if let Some(v) = cfg.volts_per_div {
+            self.session.command(&format!("{c}:SCALe {v}")).await?;
+        }
+        if let Some(v) = cfg.offset_volts {
+            self.session.command(&format!("{c}:OFFSet {v}")).await?;
+        }
+        Ok(Applied {
+            state: self.channel(channel).await?,
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    pub async fn configure_timebase(
+        &self,
+        seconds_per_div: Option<f64>,
+        offset_seconds: Option<f64>,
+    ) -> Result<Applied<Timebase>> {
+        if let Some(s) = seconds_per_div
+            && !(s.is_finite() && s > 0.0)
+        {
+            return Err(Error::OutOfRange {
+                what: "timebase scale (s/div)",
+                value: s,
+                allowed: "a positive number".into(),
+            });
+        }
+        check_finite("timebase offset (s)", offset_seconds)?;
+
+        self.session.clear_status().await?;
+        if let Some(s) = seconds_per_div {
+            self.session
+                .command(&format!(":TIMebase:MAIN:SCALe {s}"))
+                .await?;
+        }
+        if let Some(o) = offset_seconds {
+            self.session
+                .command(&format!(":TIMebase:MAIN:OFFSet {o}"))
+                .await?;
+        }
+        Ok(Applied {
+            state: Timebase {
+                seconds_per_div: self.number(":TIMebase:MAIN:SCALe?").await?,
+                offset_seconds: self.number(":TIMebase:MAIN:OFFSet?").await?,
+            },
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    /// Switches the trigger to edge mode and applies the given settings.
+    pub async fn configure_edge_trigger(
+        &self,
+        cfg: &EdgeTriggerConfig,
+    ) -> Result<Applied<EdgeTrigger>> {
+        if let Some(ch) = cfg.channel {
+            self.check_channel(ch)?;
+        }
+        check_finite("trigger level (V)", cfg.level_volts)?;
+
+        self.session.clear_status().await?;
+        self.session.command(":TRIGger:MODE EDGE").await?;
+        if let Some(ch) = cfg.channel {
+            self.session
+                .command(&format!(":TRIGger:EDGE:SOURce CHANnel{ch}"))
+                .await?;
+        }
+        if let Some(s) = cfg.slope {
+            self.session
+                .command(&format!(":TRIGger:EDGE:SLOPe {}", s.scpi()))
+                .await?;
+        }
+        if let Some(l) = cfg.level_volts {
+            self.session
+                .command(&format!(":TRIGger:EDGE:LEVel {l}"))
+                .await?;
+        }
+        if let Some(s) = cfg.sweep {
+            self.session
+                .command(&format!(":TRIGger:SWEep {}", s.scpi()))
+                .await?;
+        }
+        Ok(Applied {
+            state: EdgeTrigger {
+                mode: self.text(":TRIGger:MODE?").await?,
+                source: self.text(":TRIGger:EDGE:SOURce?").await?,
+                slope: self.text(":TRIGger:EDGE:SLOPe?").await?,
+                level_volts: self.number(":TRIGger:EDGE:LEVel?").await?,
+                sweep: self.text(":TRIGger:SWEep?").await?,
+            },
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    /// Smallest vertical scale at a 1x probe: 200 µV/div on the DHO900
+    /// series, 500 µV/div on the DHO800 (Programming Guide, `:CHANnel<n>:SCALe`).
+    fn min_volts_per_div(&self) -> f64 {
+        if self.identity.model.to_ascii_uppercase().starts_with("DHO9") {
+            200e-6
+        } else {
+            500e-6
+        }
+    }
+
     fn check_channel(&self, channel: u8) -> Result<()> {
         if (1..=self.channels).contains(&channel) {
             Ok(())
@@ -533,6 +822,17 @@ impl Dho900 {
                 reply: raw,
             }),
         }
+    }
+}
+
+fn check_finite(what: &'static str, value: Option<f64>) -> Result<()> {
+    match value {
+        Some(v) if !v.is_finite() => Err(Error::OutOfRange {
+            what,
+            value: v,
+            allowed: "a finite number".into(),
+        }),
+        _ => Ok(()),
     }
 }
 
