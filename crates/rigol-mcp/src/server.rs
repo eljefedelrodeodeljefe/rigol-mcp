@@ -427,6 +427,106 @@ impl RigolServer {
             .map_err(tool_error)?;
         Ok(Self::ok(&data))
     }
+
+    // ── Writes ────────────────────────────────────────────────────────────────
+    //
+    // Display and acquisition only — nothing here reaches the device under
+    // test. Still behind RIGOL_ALLOW_WRITES, like every mutating tool.
+
+    #[tool(description = "Start acquiring continuously (:RUN). Requires RIGOL_ALLOW_WRITES")]
+    async fn run(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::run(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Stop acquiring and freeze the display (:STOP). Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn stop(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::stop(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Arm a single acquisition: capture once on the next trigger, then stop (:SINGle). Arm this before causing the event, e.g. before turning a supply on. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn single(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::single(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Let the scope choose vertical scale, timebase and trigger for the current signal (:AUToset). Overwrites the current setup. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn autoset(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::autoset(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Remove every measurement from the scope's on-screen list (:MEASure:CLEar), including those added by measure. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn clear_measurements(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::clear_measurements(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Change a channel's vertical setup: display, scale, offset, coupling, probe ratio (:CHANnel<n>:…). Omitted fields are left alone. Returns the setup the scope actually holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_channel(
+        &self,
+        Parameters(p): Parameters<ConfigureChannelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_channel(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Change the horizontal scale and/or offset (:TIMebase:MAIN:SCALe / :OFFSet). Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_timebase(
+        &self,
+        Parameters(p): Parameters<ConfigureTimebaseParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_timebase(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:…, :TRIGger:SWEep). Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_edge_trigger(
+        &self,
+        Parameters(p): Parameters<ConfigureEdgeTriggerParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_edge_trigger(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -516,6 +616,11 @@ mod tests {
         assert_eq!(
             names(&RigolServer::router_for(Family::Dho900)),
             [
+                "autoset",
+                "clear_measurements",
+                "configure_channel",
+                "configure_edge_trigger",
+                "configure_timebase",
                 "get_identity",
                 "get_instrument_errors",
                 "get_lan_config",
@@ -523,6 +628,9 @@ mod tests {
                 "get_status",
                 "get_waveform",
                 "measure",
+                "run",
+                "single",
+                "stop",
             ]
         );
     }
