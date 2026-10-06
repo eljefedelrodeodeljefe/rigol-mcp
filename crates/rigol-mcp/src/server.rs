@@ -290,15 +290,17 @@ impl RigolServer {
 impl ServerHandler for RigolServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "RIGOL DP800-series bench power supply control over SCPI (raw TCP socket). \
-             Configure with RIGOL_HOST. Optional: RIGOL_PORT (default 5555 — note this is \
-             not the LXI-conventional 5025), RIGOL_TIMEOUT_MS (default 5000), \
-             RIGOL_ALLOW_WRITES (default false — must be 'true' to enable mutating tools), \
-             and per-channel safety ceilings RIGOL_CH<n>_MAX_VOLTS / RIGOL_CH<n>_MAX_AMPS \
-             (default: the channel's own rating). \
-             This instrument sources real power into real hardware: setting a voltage and \
-             energising an output are separate operations, and setpoints above a channel's \
-             ceiling are refused before they reach the instrument.",
+            concat!(
+                "RIGOL DP800-series bench power supply control over SCPI (raw TCP socket). ",
+                "Configure with RIGOL_HOST. Optional: RIGOL_PORT (default 5555 — note this is ",
+                "not the LXI-conventional 5025), RIGOL_TIMEOUT_MS (default 5000), ",
+                "RIGOL_ALLOW_WRITES (default false — must be 'true' to enable mutating tools), ",
+                "and per-channel safety ceilings RIGOL_CH<n>_MAX_VOLTS / RIGOL_CH<n>_MAX_AMPS ",
+                "(default: the channel's own rating). ",
+                "This instrument sources real power into real hardware: setting a voltage and ",
+                "energising an output are separate operations, and setpoints above a channel's ",
+                "ceiling are refused before they reach the instrument.",
+            ),
         )
     }
 }
