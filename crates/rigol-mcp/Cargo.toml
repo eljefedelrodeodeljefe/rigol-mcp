@@ -20,3 +20,6 @@ schemars = "1.0"
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+rigol-fake = { workspace = true }
