@@ -22,4 +22,6 @@ pub use dp800::{
 };
 pub use error::{Error, Result};
 pub use limits::Limits;
-pub use scpi::{DEFAULT_PORT, DEFAULT_TIMEOUT, InstrumentError, Session, SessionConfig};
+pub use scpi::{
+    DEFAULT_MAX_BLOCK_BYTES, DEFAULT_PORT, DEFAULT_TIMEOUT, InstrumentError, Session, SessionConfig,
+};

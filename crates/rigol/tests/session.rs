@@ -8,6 +8,7 @@ use rigol_fake::{Fake, Reply, step};
 fn cfg(timeout_ms: u64) -> SessionConfig {
     SessionConfig {
         timeout: Duration::from_millis(timeout_ms),
+        ..SessionConfig::default()
     }
 }
 
@@ -91,5 +92,131 @@ async fn the_error_queue_drains_until_no_error() {
 
     let codes: Vec<i32> = errors.iter().map(|e| e.code).collect();
     assert_eq!(codes, [-113, -100]);
+    fake.finish();
+}
+
+/// A PNG-like payload: binary, and full of the newlines a line read stops at.
+fn binary_payload(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+#[tokio::test]
+async fn a_block_survives_one_byte_writes() {
+    let payload = binary_payload(4096);
+    let fake = Fake::start(vec![step(":DISP:DATA? PNG", Reply::block(&payload, 1))]).await;
+    let s = Session::connect(fake.addr(), cfg(2000)).await.unwrap();
+
+    let got = s.query_block(":DISP:DATA? PNG").await.unwrap();
+
+    assert_eq!(got, payload);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_query_after_a_block_gets_its_own_reply() {
+    let payload = binary_payload(1000);
+    let fake = Fake::start(vec![
+        step(":WAV:DATA?", Reply::block(&payload, 4096)),
+        step(":WAV:PRE?", Reply::line("0,0,1000,1,1e-6,0,0,0.01,0,128")),
+    ])
+    .await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    assert_eq!(s.query_block(":WAV:DATA?").await.unwrap(), payload);
+    let pre = s.query(":WAV:PRE?").await.unwrap();
+
+    assert_eq!(pre, "0,0,1000,1,1e-6,0,0,0.01,0,128");
+    fake.finish();
+}
+
+/// The block's newline can arrive after the block was returned. The next
+/// query must skip it rather than return it as an empty reply.
+#[tokio::test]
+async fn a_late_block_terminator_is_skipped() {
+    let payload = b"abc\ndef".to_vec();
+    let mut bare = format!("#1{}", payload.len()).into_bytes();
+    bare.extend_from_slice(&payload);
+    let fake = Fake::start(vec![
+        step(
+            ":DISP:DATA? PNG",
+            Reply::Raw {
+                bytes: bare,
+                chunk: 64,
+            },
+        ),
+        step(
+            "*IDN?",
+            Reply::Raw {
+                bytes: b"\nRIGOL,DHO924S,X,1\n".to_vec(),
+                chunk: 64,
+            },
+        ),
+    ])
+    .await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    assert_eq!(s.query_block(":DISP:DATA? PNG").await.unwrap(), payload);
+    assert_eq!(s.query("*IDN?").await.unwrap(), "RIGOL,DHO924S,X,1");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn an_oversized_block_is_refused_before_allocation() {
+    let fake = Fake::start(vec![step(
+        ":WAV:DATA?",
+        Reply::Raw {
+            bytes: b"#9999999999".to_vec(),
+            chunk: 64,
+        },
+    )])
+    .await;
+    let small = SessionConfig {
+        max_block_bytes: 1024,
+        ..cfg(1000)
+    };
+    let s = Session::connect(fake.addr(), small).await.unwrap();
+
+    let err = s.query_block(":WAV:DATA?").await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::BlockTooLarge {
+                len: 999_999_999,
+                cap: 1024,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    fake.finish();
+}
+
+#[tokio::test]
+async fn an_indefinite_length_block_is_refused() {
+    let fake = Fake::start(vec![step(
+        ":WAV:DATA?",
+        Reply::Raw {
+            bytes: b"#0abc\n".to_vec(),
+            chunk: 64,
+        },
+    )])
+    .await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    let err = s.query_block(":WAV:DATA?").await.unwrap_err();
+
+    assert!(matches!(err, Error::Protocol { .. }), "{err:?}");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_text_reply_where_a_block_was_expected_is_a_protocol_error() {
+    let fake = Fake::start(vec![step(":DISP:DATA? PNG", Reply::line("0"))]).await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    let err = s.query_block(":DISP:DATA? PNG").await.unwrap_err();
+
+    assert!(matches!(err, Error::Protocol { .. }), "{err:?}");
     fake.finish();
 }

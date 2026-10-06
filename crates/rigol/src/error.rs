@@ -16,6 +16,16 @@ pub enum Error {
     #[error("the instrument closed the connection")]
     ConnectionClosed,
 
+    /// The reply broke the framing the command calls for, e.g. a binary block
+    /// whose header is malformed.
+    #[error("malformed reply to `{cmd}`: {detail}")]
+    Protocol { cmd: String, detail: String },
+
+    /// A binary block declared a length above the session's cap. Checked
+    /// before allocating, so a corrupt header cannot exhaust memory.
+    #[error("reply to `{cmd}` declares a {len}-byte block, above the {cap}-byte cap")]
+    BlockTooLarge { cmd: String, len: usize, cap: usize },
+
     #[error("could not parse the reply to `{cmd}`: {reply:?}")]
     Parse { cmd: String, reply: String },
 
