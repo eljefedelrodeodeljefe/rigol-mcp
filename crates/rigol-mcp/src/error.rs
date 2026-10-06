@@ -13,6 +13,9 @@ pub fn tool_error(e: anyhow::Error) -> ErrorData {
             rigol::Error::LimitExceeded { .. } | rigol::Error::NoSuchChannel(_) => {
                 ErrorCode::INVALID_PARAMS
             }
+            // Misconfiguration, not a malfunction: RIGOL_FAMILY names one kind
+            // of instrument and another one answered at RIGOL_HOST.
+            rigol::Error::WrongInstrument { .. } => ErrorCode::INVALID_REQUEST,
             _ => ErrorCode::INTERNAL_ERROR,
         };
         return ErrorData::new(code, err.to_string(), None);

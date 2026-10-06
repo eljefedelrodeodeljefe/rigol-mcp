@@ -1,0 +1,250 @@
+[
+  {
+    "name": "get_channel",
+    "description": "Get one channel's rating and voltage/current setpoints (:APPLy? CHn). Setpoints are what the channel is set to, not what it is delivering — use measure_channel for that",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_identity",
+    "description": "Get instrument identity: vendor, model, serial number and firmware (*IDN?)",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_instrument_errors",
+    "description": "Read and drain the instrument's error queue (:SYSTem:ERRor?)",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_lan_config",
+    "description": "Get the instrument's LAN configuration (:SYSTem:COMMunicate:LAN). Fields this firmware does not support come back null",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_output_state",
+    "description": "Get whether a channel's output is on or off (:OUTPut? CHn)",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_protection",
+    "description": "Get over-voltage and over-current protection for a channel: enabled state, trip levels, and whether protection has tripped (:OUTPut:OVP/OCP)",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "get_safety_limits",
+    "description": "Get the safety ceilings currently in force for each channel. Any setpoint above these is refused before it reaches the instrument",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_channels",
+    "description": "List all three channels with their ratings and setpoints",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "measure_channel",
+    "description": "Measure what a channel is actually delivering: volts, amps and watts (:MEASure:ALL? CHn)",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "output_off",
+    "description": "Turn a channel's output off (:OUTPut CHn,OFF)",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "output_on",
+    "description": "ENERGISE a channel — turns the output on at its current setpoints (:OUTPut CHn,ON). Check get_channel first: this delivers real power to whatever is connected",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3 (CH3 is the 5V/3A rail)",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_current",
+    "description": "Set a channel's current limit (:SOURce<n>:CURRent). Does NOT turn the output on. Refused if above the channel's safety ceiling",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "amps": {
+          "description": "Current limit in amps. Refused if it exceeds the configured ceiling for this channel.",
+          "format": "double",
+          "type": "number"
+        },
+        "channel": {
+          "description": "Output channel: 1, 2 or 3",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel",
+        "amps"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_protection",
+    "description": "Set over-voltage (OVP) and/or over-current (OCP) protection trip levels for a channel",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ocp_amps": {
+          "description": "Over-current protection trip level in amps (OCP)",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ovp_volts": {
+          "description": "Over-voltage protection trip level in volts (OVP)",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "set_voltage",
+    "description": "Set a channel's voltage setpoint (:SOURce<n>:VOLTage). Does NOT turn the output on. Refused if above the channel's safety ceiling",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "channel": {
+          "description": "Output channel: 1, 2 or 3",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "volts": {
+          "description": "Voltage setpoint in volts. Refused if it exceeds the configured ceiling for this channel. Does NOT energise the output — call output_on for that.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "channel",
+        "volts"
+      ],
+      "type": "object"
+    }
+  }
+]

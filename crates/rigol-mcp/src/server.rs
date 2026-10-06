@@ -1,8 +1,8 @@
 use anyhow::Context;
-use rigol::{Dp800, Limits, SessionConfig};
+use rigol::{Dp800, Family, Limits, SessionConfig};
 use rmcp::{
     ServerHandler,
-    handler::server::wrapper::Parameters,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ErrorCode, ErrorData, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
@@ -15,6 +15,11 @@ use crate::params::*;
 use crate::tools;
 
 pub struct RigolServer {
+    /// Which instrument family this process drives. One family per process:
+    /// a PSU and a scope run as two servers, each with its own write gate.
+    family: Family,
+    /// The tools for `family`, and only those.
+    tool_router: ToolRouter<Self>,
     host: String,
     port: Option<u16>,
     cfg: SessionConfig,
@@ -29,6 +34,12 @@ pub struct RigolServer {
 impl RigolServer {
     pub fn from_env() -> anyhow::Result<Self> {
         let host = std::env::var("RIGOL_HOST").context("RIGOL_HOST not set")?;
+        // Defaults to dp800 so configurations written before scope support
+        // keep meaning what they meant.
+        let family: Family = match std::env::var("RIGOL_FAMILY") {
+            Ok(f) => f.parse().map_err(anyhow::Error::msg)?,
+            Err(_) => Family::Dp800,
+        };
         let port = match std::env::var("RIGOL_PORT") {
             Ok(p) => Some(
                 p.parse()
@@ -60,6 +71,8 @@ impl RigolServer {
         }
 
         Ok(Self {
+            family,
+            tool_router: Self::router_for(family),
             host,
             port,
             cfg: SessionConfig {
@@ -85,6 +98,30 @@ impl RigolServer {
             })
             .await
             .map_err(|e| tool_error(e.into()))
+    }
+
+    #[cfg(test)]
+    fn for_test(family: Family, addr: std::net::SocketAddr) -> Self {
+        Self {
+            family,
+            tool_router: Self::router_for(family),
+            host: addr.ip().to_string(),
+            port: Some(addr.port()),
+            cfg: SessionConfig::default(),
+            configured_limits: Limits::new(),
+            writes_enabled: false,
+            psu: OnceCell::new(),
+        }
+    }
+
+    /// The tool set for a family. Announced at startup, before the instrument
+    /// is reachable, which is why the family comes from configuration and the
+    /// instrument's own `*IDN?` only confirms it.
+    fn router_for(family: Family) -> ToolRouter<Self> {
+        match family {
+            Family::Dp800 => Self::psu_router(),
+            Family::Dho900 => Self::scope_router(),
+        }
     }
 
     fn ok(value: &Value) -> CallToolResult {
@@ -116,7 +153,7 @@ fn env_f64(key: &str) -> anyhow::Result<Option<f64>> {
     }
 }
 
-#[tool_router]
+#[tool_router(router = psu_router)]
 impl RigolServer {
     // ── Reads ─────────────────────────────────────────────────────────────────
 
@@ -287,21 +324,92 @@ impl RigolServer {
     }
 }
 
-#[tool_handler]
+/// Oscilloscope tools. Empty until the DHO900 device model lands.
+#[tool_router(router = scope_router)]
+impl RigolServer {}
+
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for RigolServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            concat!(
-                "RIGOL DP800-series bench power supply control over SCPI (raw TCP socket). ",
-                "Configure with RIGOL_HOST. Optional: RIGOL_PORT (default 5555 — note this is ",
-                "not the LXI-conventional 5025), RIGOL_TIMEOUT_MS (default 5000), ",
-                "RIGOL_ALLOW_WRITES (default false — must be 'true' to enable mutating tools), ",
-                "and per-channel safety ceilings RIGOL_CH<n>_MAX_VOLTS / RIGOL_CH<n>_MAX_AMPS ",
-                "(default: the channel's own rating). ",
-                "This instrument sources real power into real hardware: setting a voltage and ",
-                "energising an output are separate operations, and setpoints above a channel's ",
-                "ceiling are refused before they reach the instrument.",
-            ),
-        )
+        let instructions = match self.family {
+            Family::Dp800 => PSU_INSTRUCTIONS,
+            Family::Dho900 => SCOPE_INSTRUCTIONS,
+        };
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(instructions)
+    }
+}
+
+const PSU_INSTRUCTIONS: &str = concat!(
+    "RIGOL DP800-series bench power supply control over SCPI (raw TCP socket). ",
+    "Configure with RIGOL_HOST. Optional: RIGOL_PORT (default 5555 — note this is ",
+    "not the LXI-conventional 5025), RIGOL_TIMEOUT_MS (default 5000), ",
+    "RIGOL_ALLOW_WRITES (default false — must be 'true' to enable mutating tools), ",
+    "and per-channel safety ceilings RIGOL_CH<n>_MAX_VOLTS / RIGOL_CH<n>_MAX_AMPS ",
+    "(default: the channel's own rating). ",
+    "This instrument sources real power into real hardware: setting a voltage and ",
+    "energising an output are separate operations, and setpoints above a channel's ",
+    "ceiling are refused before they reach the instrument.",
+);
+
+const SCOPE_INSTRUCTIONS: &str = concat!(
+    "RIGOL DHO800/DHO900-series oscilloscope control over SCPI (raw TCP socket). ",
+    "Configure with RIGOL_HOST and RIGOL_FAMILY=dho900. Optional: RIGOL_PORT (default 5555), ",
+    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false).",
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted_tools(router: &ToolRouter<RigolServer>) -> Vec<rmcp::model::Tool> {
+        let mut tools = router.list_all();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
+    }
+
+    /// The PSU tool surface is a published contract: same names, same
+    /// schemas, same descriptions as before the family split.
+    #[test]
+    fn the_psu_tools_are_unchanged() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/dp800-tools.json")).unwrap();
+        let actual =
+            serde_json::to_value(sorted_tools(&RigolServer::router_for(Family::Dp800))).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn a_psu_server_refuses_a_scope_and_names_both() {
+        use rigol_fake::{Fake, Reply, step};
+        let fake = Fake::start(vec![step(
+            "*IDN?",
+            Reply::line("RIGOL TECHNOLOGIES,DHO924S,DHO9S000000001,00.01.05"),
+        )])
+        .await;
+        let server = RigolServer::for_test(Family::Dp800, fake.addr);
+
+        let err = server
+            .psu()
+            .await
+            .err()
+            .expect("a scope must not pass as a PSU");
+
+        assert_eq!(err.code, ErrorCode::INVALID_REQUEST);
+        assert!(err.message.contains("dp800"), "{}", err.message);
+        assert!(err.message.contains("DHO924S"), "{}", err.message);
+        fake.finish();
+    }
+
+    #[test]
+    fn a_scope_server_exposes_no_psu_tools() {
+        let scope = RigolServer::router_for(Family::Dho900);
+        for tool in sorted_tools(&RigolServer::router_for(Family::Dp800)) {
+            assert!(
+                !scope.has_route(&tool.name),
+                "{} leaked into the scope router",
+                tool.name
+            );
+        }
     }
 }
