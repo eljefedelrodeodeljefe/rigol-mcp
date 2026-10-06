@@ -331,10 +331,19 @@ async fn read_block(
     Ok((payload, pending))
 }
 
+/// Sends `cmd` and its terminator as **one** write.
+///
+/// Not a micro-optimisation. With `TCP_NODELAY` set, two writes leave as two
+/// segments, and DHO900 firmware drops the reply to a command whose newline
+/// arrives in a segment of its own: measured on a DHO924S (00.01.05), 9 of 78
+/// replies were lost with separate writes, none with one. Loopback tests
+/// cannot see this, as the receiver reads both segments at once.
 async fn write_line(io: &mut BufReader<TcpStream>, cmd: &str) -> Result<()> {
+    let mut frame = Vec::with_capacity(cmd.len() + 1);
+    frame.extend_from_slice(cmd.as_bytes());
+    frame.push(b'\n');
     let stream = io.get_mut();
-    stream.write_all(cmd.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
+    stream.write_all(&frame).await?;
     stream.flush().await?;
     Ok(())
 }
