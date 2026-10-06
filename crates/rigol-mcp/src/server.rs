@@ -1,5 +1,6 @@
 use anyhow::Context;
-use rigol::{Dp800, Family, Limits, SessionConfig};
+use base64::Engine;
+use rigol::{Dho900, Dp800, Family, Limits, SessionConfig};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -29,6 +30,8 @@ pub struct RigolServer {
     /// on this instrument, and a session survives idle, so holding one open is
     /// safe.
     psu: OnceCell<Dp800>,
+    /// The oscilloscope, for a `dho900` process. Connected on first use.
+    scope: OnceCell<Dho900>,
 }
 
 impl RigolServer {
@@ -82,6 +85,7 @@ impl RigolServer {
             configured_limits,
             writes_enabled,
             psu: OnceCell::new(),
+            scope: OnceCell::new(),
         })
     }
 
@@ -111,6 +115,7 @@ impl RigolServer {
             configured_limits: Limits::new(),
             writes_enabled: false,
             psu: OnceCell::new(),
+            scope: OnceCell::new(),
         }
     }
 
@@ -122,6 +127,15 @@ impl RigolServer {
             Family::Dp800 => Self::psu_router(),
             Family::Dho900 => Self::scope_router(),
         }
+    }
+
+    async fn scope(&self) -> Result<&Dho900, ErrorData> {
+        self.scope
+            .get_or_try_init(|| async {
+                Dho900::connect(&self.host, self.port, self.cfg.clone()).await
+            })
+            .await
+            .map_err(|e| tool_error(e.into()))
     }
 
     fn ok(value: &Value) -> CallToolResult {
@@ -324,9 +338,96 @@ impl RigolServer {
     }
 }
 
-/// Oscilloscope tools. Empty until the DHO900 device model lands.
+/// Oscilloscope tools. Names mirror the PSU's where the meaning is the same
+/// (`get_identity`, `get_lan_config`, `get_instrument_errors`); the two sets
+/// never share a process.
 #[tool_router(router = scope_router)]
-impl RigolServer {}
+impl RigolServer {
+    // ── Reads ─────────────────────────────────────────────────────────────────
+
+    #[tool(
+        name = "get_identity",
+        description = "Get oscilloscope identity: vendor, model, serial number, firmware (*IDN?) and analog channel count"
+    )]
+    async fn scope_get_identity(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::identity(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        name = "get_lan_config",
+        description = "Get the oscilloscope's LAN state: link status, DHCP, IP, mask, gateway, MAC (:LAN:STATus? :DHCP? :IPADdress? :SMASk? :GATeway? :MAC?)"
+    )]
+    async fn scope_get_lan_config(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::lan_config(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        name = "get_instrument_errors",
+        description = "Drain the oscilloscope's SCPI error queue (:SYSTem:ERRor?)"
+    )]
+    async fn scope_get_instrument_errors(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::instrument_errors(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Get trigger status and edge setup, timebase, sample rate, memory depth, acquisition type, and every channel's display/scale/offset/coupling/probe (:TRIGger:STATus? :TIMebase:MAIN:SCALe? :ACQuire:SRATe? :CHANnel<n>:…). trigger_status is TD (triggered), WAIT, RUN, AUTO or STOP"
+    )]
+    async fn get_status(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::status(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Make one automatic measurement on a channel (:MEASure:ITEM? <item>,CHANnel<n>). value is null when the scope cannot measure it on the current signal — e.g. a frequency with no edges on screen. Like choosing it on the front panel, this also adds the item to the scope's on-screen measurement list"
+    )]
+    async fn measure(
+        &self,
+        Parameters(p): Parameters<MeasureParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::measure(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Capture the oscilloscope screen as a PNG image (:DISPlay:DATA? PNG). The quickest way to see the instrument's whole state at once"
+    )]
+    async fn get_screenshot(&self) -> Result<CallToolResult, ErrorData> {
+        let png = tools::scope::screenshot(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        Ok(CallToolResult::success(vec![Content::image(
+            data,
+            "image/png",
+        )]))
+    }
+
+    #[tool(
+        description = "Read one channel's on-screen trace in volts against seconds (:WAVeform:PREamble? :WAVeform:DATA?), thinned to min/max buckets, with min/max/mean/RMS over every captured sample. Sets the waveform transfer source and format only — no acquisition or display setting changes"
+    )]
+    async fn get_waveform(
+        &self,
+        Parameters(p): Parameters<WaveformParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::waveform(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RigolServer {
@@ -355,7 +456,9 @@ const PSU_INSTRUCTIONS: &str = concat!(
 const SCOPE_INSTRUCTIONS: &str = concat!(
     "RIGOL DHO800/DHO900-series oscilloscope control over SCPI (raw TCP socket). ",
     "Configure with RIGOL_HOST and RIGOL_FAMILY=dho900. Optional: RIGOL_PORT (default 5555), ",
-    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false).",
+    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false). ",
+    "Start with get_screenshot to see the instrument's state, then get_status for exact values. ",
+    "Measurements that the current signal does not support return a null value.",
 );
 
 #[cfg(test)]
@@ -401,14 +504,43 @@ mod tests {
         fake.finish();
     }
 
+    fn names(router: &ToolRouter<RigolServer>) -> Vec<String> {
+        sorted_tools(router)
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
     #[test]
-    fn a_scope_server_exposes_no_psu_tools() {
+    fn a_scope_server_exposes_exactly_the_scope_tools() {
+        assert_eq!(
+            names(&RigolServer::router_for(Family::Dho900)),
+            [
+                "get_identity",
+                "get_instrument_errors",
+                "get_lan_config",
+                "get_screenshot",
+                "get_status",
+                "get_waveform",
+                "measure",
+            ]
+        );
+    }
+
+    /// Nothing that sets a PSU output can be reachable from a scope process.
+    #[test]
+    fn no_psu_write_is_reachable_from_a_scope_server() {
         let scope = RigolServer::router_for(Family::Dho900);
-        for tool in sorted_tools(&RigolServer::router_for(Family::Dp800)) {
+        for tool in [
+            "set_voltage",
+            "set_current",
+            "set_protection",
+            "output_on",
+            "output_off",
+        ] {
             assert!(
-                !scope.has_route(&tool.name),
-                "{} leaked into the scope router",
-                tool.name
+                !scope.has_route(tool),
+                "{tool} is reachable from the scope router"
             );
         }
     }
