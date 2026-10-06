@@ -1,0 +1,11 @@
+[package]
+name = "rigol-fake"
+description = "Scripted fake SCPI instrument for testing the rigol crates (test-only, unpublished)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tokio = { workspace = true }

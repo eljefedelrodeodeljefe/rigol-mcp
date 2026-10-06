@@ -1,0 +1,164 @@
+//! A scripted fake instrument for exercising the real `rigol::Session` over TCP.
+//!
+//! Test-only: this crate is a dev-dependency and is never published.
+//!
+//! The fake plays a fixed script of `(expected command, reply)` steps, in
+//! order, across however many connections the client opens, so reconnects
+//! are part of what a test can observe. A command that does not match the
+//! next step is recorded as a failure and gets no reply, and
+//! [`Fake::finish`] fails the test if any step was missed or mismatched.
+
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::net::tcp::OwnedWriteHalf;
+
+/// What the fake sends back for one step.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    /// A line, newline-terminated by the fake.
+    Line(String),
+    /// Nothing at all, as when firmware ignores a query it does not know.
+    Silence,
+    /// A line sent after a delay — a reply that outlives the client's timeout.
+    LateLine(Duration, String),
+    /// Bytes written exactly as given, in chunks of the given size.
+    Raw { bytes: Vec<u8>, chunk: usize },
+    /// No reply expected (a command, not a query).
+    None,
+}
+
+impl Reply {
+    pub fn line(s: &str) -> Self {
+        Self::Line(s.to_string())
+    }
+
+    /// An IEEE 488.2 definite-length block with a trailing newline, as the
+    /// instrument sends it, split into `chunk`-byte writes.
+    pub fn block(payload: &[u8], chunk: usize) -> Self {
+        let len = payload.len().to_string();
+        let mut bytes = format!("#{}{}", len.len(), len).into_bytes();
+        bytes.extend_from_slice(payload);
+        bytes.push(b'\n');
+        Self::Raw { bytes, chunk }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Step {
+    pub expect: String,
+    pub reply: Reply,
+}
+
+pub fn step(expect: &str, reply: Reply) -> Step {
+    Step {
+        expect: expect.to_string(),
+        reply,
+    }
+}
+
+#[derive(Default)]
+struct State {
+    script: VecDeque<Step>,
+    failures: Vec<String>,
+    connections: usize,
+}
+
+pub struct Fake {
+    pub addr: SocketAddr,
+    state: Arc<Mutex<State>>,
+}
+
+impl Fake {
+    pub async fn start(script: Vec<Step>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let state = Arc::new(Mutex::new(State {
+            script: script.into(),
+            ..State::default()
+        }));
+
+        let shared = state.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                shared.lock().unwrap().connections += 1;
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    while let Ok(Some(cmd)) = lines.next_line().await {
+                        let next = {
+                            let mut st = shared.lock().unwrap();
+                            match st.script.front() {
+                                Some(s) if s.expect == cmd => st.script.pop_front(),
+                                Some(s) => {
+                                    let msg = format!("expected `{}`, got `{cmd}`", s.expect);
+                                    st.failures.push(msg);
+                                    None
+                                }
+                                None => {
+                                    st.failures.push(format!("unscripted command `{cmd}`"));
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(step) = next {
+                            respond(&mut write, step.reply).await;
+                        }
+                    }
+                });
+            }
+        });
+
+        Self { addr, state }
+    }
+
+    pub fn addr(&self) -> String {
+        self.addr.to_string()
+    }
+
+    /// How many TCP connections the client has opened so far.
+    pub fn connections(&self) -> usize {
+        self.state.lock().unwrap().connections
+    }
+
+    /// Fails the test unless every step ran and nothing unexpected arrived.
+    pub fn finish(&self) {
+        let st = self.state.lock().unwrap();
+        assert!(
+            st.failures.is_empty(),
+            "fake instrument saw: {:?}",
+            st.failures
+        );
+        let left: Vec<_> = st.script.iter().map(|s| s.expect.clone()).collect();
+        assert!(left.is_empty(), "steps never reached: {left:?}");
+    }
+}
+
+async fn respond(write: &mut OwnedWriteHalf, reply: Reply) {
+    match reply {
+        Reply::Line(s) => {
+            let _ = write.write_all(format!("{s}\n").as_bytes()).await;
+        }
+        Reply::Silence | Reply::None => {}
+        Reply::LateLine(after, s) => {
+            // Delay in place: the fake answers one command at a time, like the
+            // instrument, so a later command on this socket waits behind it.
+            tokio::time::sleep(after).await;
+            let _ = write.write_all(format!("{s}\n").as_bytes()).await;
+        }
+        Reply::Raw { bytes, chunk } => {
+            for part in bytes.chunks(chunk.max(1)) {
+                if write.write_all(part).await.is_err() {
+                    return;
+                }
+                let _ = write.flush().await;
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+}

@@ -8,6 +8,11 @@
 //! - tcp/5555 is the live port. tcp/5025, the LXI-conventional one, is closed.
 //! - One command in flight at a time: request/response pairing on a single
 //!   socket has no other safe option, and these PSUs tolerate few sessions.
+//! - A session that timed out or failed mid-exchange is *poisoned*: the
+//!   instrument may still send the reply it owes, and pairing that late reply
+//!   with the next query would shift every answer after it by one. A poisoned
+//!   session reconnects before its next command. Draining is not an option —
+//!   there is no way to know whether a late reply is still coming.
 
 use std::time::Duration;
 
@@ -62,24 +67,28 @@ impl InstrumentError {
 pub struct Session {
     addr: String,
     cfg: SessionConfig,
-    conn: Mutex<BufReader<TcpStream>>,
+    conn: Mutex<Conn>,
+}
+
+/// The socket and whether it can still be trusted. Kept behind one lock so
+/// that checking, reconnecting and using the socket are a single step.
+struct Conn {
+    io: BufReader<TcpStream>,
+    poisoned: bool,
 }
 
 impl Session {
     pub async fn connect(addr: impl Into<String>, cfg: SessionConfig) -> Result<Self> {
         let addr = addr.into();
-        let stream = tokio::time::timeout(cfg.timeout, TcpStream::connect(&addr))
-            .await
-            .map_err(|_| Error::Timeout {
-                cmd: format!("connect {addr}"),
-                waited: cfg.timeout,
-            })??;
-        let _ = stream.set_nodelay(true);
+        let io = open(&addr, cfg.timeout).await?;
         tracing::debug!(%addr, "scpi session established");
         Ok(Self {
             addr,
             cfg,
-            conn: Mutex::new(BufReader::new(stream)),
+            conn: Mutex::new(Conn {
+                io,
+                poisoned: false,
+            }),
         })
     }
 
@@ -90,43 +99,31 @@ impl Session {
     /// Re-establishes the socket in place, so a dropped link does not require a
     /// process restart.
     pub async fn reconnect(&self) -> Result<()> {
-        let stream = tokio::time::timeout(self.cfg.timeout, TcpStream::connect(&self.addr))
-            .await
-            .map_err(|_| Error::Timeout {
-                cmd: format!("reconnect {}", self.addr),
-                waited: self.cfg.timeout,
-            })??;
-        let _ = stream.set_nodelay(true);
-        *self.conn.lock().await = BufReader::new(stream);
+        let mut conn = self.conn.lock().await;
+        conn.io = open(&self.addr, self.cfg.timeout).await?;
+        conn.poisoned = false;
         tracing::info!(addr = %self.addr, "scpi session reconnected");
         Ok(())
     }
 
     /// Sends a command that produces no reply.
     pub async fn command(&self, cmd: &str) -> Result<()> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.ready().await?;
         tracing::debug!(%cmd, "scpi command");
-        write_line(&mut conn, cmd).await
+        let result = write_line(&mut conn.io, cmd).await;
+        conn.poison_on_err(result)
     }
 
     /// Sends a query and reads exactly one line back.
     pub async fn query(&self, cmd: &str) -> Result<String> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.ready().await?;
         tracing::debug!(%cmd, "scpi query");
-        write_line(&mut conn, cmd).await?;
-
-        let mut line = String::new();
-        let read = tokio::time::timeout(self.cfg.timeout, conn.read_line(&mut line))
-            .await
-            .map_err(|_| Error::Timeout {
-                cmd: cmd.to_string(),
-                waited: self.cfg.timeout,
-            })??;
-
-        if read == 0 {
-            return Err(Error::ConnectionClosed);
+        let result = async {
+            write_line(&mut conn.io, cmd).await?;
+            read_line(&mut conn.io, cmd, self.cfg.timeout).await
         }
-        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+        .await;
+        conn.poison_on_err(result)
     }
 
     /// Drains `:SYSTem:ERRor?` until the queue reports `0,"No error"`.
@@ -153,10 +150,59 @@ impl Session {
     pub async fn clear_status(&self) -> Result<()> {
         self.command("*CLS").await
     }
+
+    /// Takes the lock and returns a connection that is safe to use, replacing
+    /// a poisoned socket first. If the reconnect fails the session stays
+    /// poisoned, so the next call tries again.
+    async fn ready(&self) -> Result<tokio::sync::MutexGuard<'_, Conn>> {
+        let mut conn = self.conn.lock().await;
+        if conn.poisoned {
+            conn.io = open(&self.addr, self.cfg.timeout).await?;
+            conn.poisoned = false;
+            tracing::info!(addr = %self.addr, "scpi session reconnected after a failed exchange");
+        }
+        Ok(conn)
+    }
 }
 
-async fn write_line(conn: &mut BufReader<TcpStream>, cmd: &str) -> Result<()> {
-    let stream = conn.get_mut();
+impl Conn {
+    /// Any failure mid-exchange leaves the stream in an unknown position:
+    /// part of a reply may be buffered, or a late one may still be on its way.
+    fn poison_on_err<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+}
+
+async fn open(addr: &str, timeout: Duration) -> Result<BufReader<TcpStream>> {
+    let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        .await
+        .map_err(|_| Error::Timeout {
+            cmd: format!("connect {addr}"),
+            waited: timeout,
+        })??;
+    let _ = stream.set_nodelay(true);
+    Ok(BufReader::new(stream))
+}
+
+async fn read_line(io: &mut BufReader<TcpStream>, cmd: &str, timeout: Duration) -> Result<String> {
+    let mut line = String::new();
+    let read = tokio::time::timeout(timeout, io.read_line(&mut line))
+        .await
+        .map_err(|_| Error::Timeout {
+            cmd: cmd.to_string(),
+            waited: timeout,
+        })??;
+    if read == 0 {
+        return Err(Error::ConnectionClosed);
+    }
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+async fn write_line(io: &mut BufReader<TcpStream>, cmd: &str) -> Result<()> {
+    let stream = io.get_mut();
     stream.write_all(cmd.as_bytes()).await?;
     stream.write_all(b"\n").await?;
     stream.flush().await?;
