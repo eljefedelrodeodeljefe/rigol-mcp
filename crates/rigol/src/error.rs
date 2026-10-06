@@ -42,6 +42,15 @@ pub enum Error {
     #[error("channel {channel} does not exist (this instrument has channels 1-{count})")]
     NoSuchInput { channel: u8, count: u8 },
 
+    /// A setting outside what the instrument accepts, refused before it is
+    /// sent.
+    #[error("refused: {what} {value} is out of range (allowed: {allowed})")]
+    OutOfRange {
+        what: &'static str,
+        value: f64,
+        allowed: String,
+    },
+
     /// The safety ceiling. Enforced here in the library, below the MCP layer,
     /// so no tool argument can route around it.
     #[error(
