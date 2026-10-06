@@ -51,6 +51,18 @@ pub enum Error {
         allowed: String,
     },
 
+    /// A signal-generator setting over its ceiling. Like [`Error::LimitExceeded`],
+    /// enforced in the library, before anything reaches the instrument.
+    #[error(
+        "refused: generator {what} {requested}{unit} exceeds the configured ceiling of {ceiling}{unit}"
+    )]
+    GeneratorLimit {
+        what: &'static str,
+        unit: &'static str,
+        requested: f64,
+        ceiling: f64,
+    },
+
     /// The safety ceiling. Enforced here in the library, below the MCP layer,
     /// so no tool argument can route around it.
     #[error(

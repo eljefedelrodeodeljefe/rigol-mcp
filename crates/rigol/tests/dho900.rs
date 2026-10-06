@@ -2,8 +2,8 @@
 //! captured from a DHO924S on firmware 00.01.05.
 
 use rigol::{
-    ChannelConfig, Coupling, Dho900, EdgeTriggerConfig, Error, Family, MeasureItem, SessionConfig,
-    Slope, Sweep,
+    ChannelConfig, Coupling, Dho900, EdgeTriggerConfig, Error, Family, GeneratorConfig,
+    GeneratorLimits, MeasureItem, SessionConfig, Slope, Sweep, Waveshape,
 };
 use rigol_fake::{Fake, Reply, Step, step};
 
@@ -357,5 +357,119 @@ async fn acquisition_control_uses_guide_spellings() {
     // A query, so the fake has seen every command before finish().
     scope.session().query("*IDN?").await.unwrap();
 
+    fake.finish();
+}
+
+// ── Signal generator ─────────────────────────────────────────────────────────
+
+fn generator_now(shape: &str, hz: &str, amp: &str, off: &str) -> Vec<Step> {
+    vec![
+        step(":SOURce:FUNCtion?", Reply::line(shape)),
+        step(":SOURce:FREQuency?", Reply::line(hz)),
+        step(":SOURce:VOLTage:AMPLitude?", Reply::line(amp)),
+        step(":SOURce:VOLTage:OFFSet?", Reply::line(off)),
+    ]
+}
+
+fn generator_readback(output: &str, shape: &str, hz: &str, amp: &str, off: &str) -> Vec<Step> {
+    let mut v = generator_now(shape, hz, amp, off);
+    v.push(step(":SOURce:OUTPut:STATe?", Reply::line(output)));
+    v
+}
+
+/// Configuring the generator must never energise it. The fake fails the
+/// test on any command not in the script, so an `:SOURce:OUTPut:STATe ON`
+/// anywhere would be caught.
+#[tokio::test]
+async fn configuring_the_generator_leaves_the_output_off() {
+    let mut script = generator_now("SIN", "1.000000E+3", "5.000000E0", "0.000000");
+    script.push(step("*CLS", Reply::None));
+    script.push(step(":SOURce:VOLTage:AMPLitude 1", Reply::None));
+    script.push(step(":SOURce:FREQuency 10000", Reply::None));
+    script.push(step(":SOURce:FUNCtion SQUare", Reply::None));
+    script.extend(generator_readback(
+        "0",
+        "SQU",
+        "1.000000E+4",
+        "1.000000E0",
+        "0.000000",
+    ));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_generator(&GeneratorConfig {
+            shape: Some(Waveshape::Square),
+            frequency_hz: Some(10_000.0),
+            amplitude_vpp: Some(1.0),
+            offset_volts: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(!applied.state.output_on);
+    assert_eq!(applied.state.peak_volts, Some(0.5));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_generator_setting_over_the_ceiling_sends_nothing() {
+    let (fake, scope) = connect(generator_now(
+        "SIN",
+        "1.000000E+3",
+        "1.000000E0",
+        "0.000000",
+    ))
+    .await;
+    let scope = scope.with_generator_limits(GeneratorLimits::new(4.0, 3.3).unwrap());
+
+    let err = scope
+        .configure_generator(&GeneratorConfig {
+            amplitude_vpp: Some(3.0),
+            offset_volts: Some(2.0),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::GeneratorLimit { .. }), "{err:?}");
+    fake.finish();
+}
+
+/// Settings changed on the front panel since configuration are checked
+/// again before the output goes on.
+#[tokio::test]
+async fn output_on_refuses_front_panel_settings_over_the_ceiling() {
+    let (fake, scope) = connect(generator_now(
+        "SIN",
+        "1.000000E+3",
+        "5.000000E0",
+        "0.000000",
+    ))
+    .await;
+    let scope = scope.with_generator_limits(GeneratorLimits::new(3.3, 1.65).unwrap());
+
+    let err = scope.generator_output_on().await.unwrap_err();
+
+    assert!(matches!(err, Error::GeneratorLimit { .. }), "{err:?}");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn output_on_within_the_ceiling_switches_on() {
+    let mut script = generator_now("SIN", "1.000000E+3", "1.000000E0", "0.000000");
+    script.push(step(":SOURce:OUTPut:STATe ON", Reply::None));
+    script.extend(generator_readback(
+        "1",
+        "SIN",
+        "1.000000E+3",
+        "1.000000E0",
+        "0.000000",
+    ));
+    let (fake, scope) = connect(script).await;
+
+    let state = scope.generator_output_on().await.unwrap();
+
+    assert!(state.output_on);
     fake.finish();
 }
