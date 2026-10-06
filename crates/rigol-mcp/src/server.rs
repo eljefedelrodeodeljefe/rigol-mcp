@@ -64,6 +64,7 @@ impl RigolServer {
             port,
             cfg: SessionConfig {
                 timeout: Duration::from_millis(timeout_ms),
+                ..SessionConfig::default()
             },
             configured_limits,
             writes_enabled,
