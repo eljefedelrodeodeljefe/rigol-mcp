@@ -1,0 +1,17 @@
+# Source-code spell checking (crate-ci/typos).
+#
+# typos looks for *known misspellings* rather than flagging every word it doesn't
+# recognise, so instrument vocabulary needs no dictionary. The exceptions below are
+# genuine false positives.
+
+[default]
+# SCPI headers are written in the programming guides' mixed case, where the
+# upper-case part is the accepted abbreviation: `:SOURce1:VOLTage`, `:MEASure`.
+# typos splits those at the case change and reads the tails as misspellings
+# (`VOLTage` -> "Tage"). Skip any token that looks like a SCPI header keyword.
+extend-ignore-re = ["\\b[A-Z]{2,}[a-z]+\\b"]
+
+[files]
+# Generated files: release-please owns CHANGELOG.md, cargo owns Cargo.lock.
+# A typo there is not ours to fix.
+extend-exclude = ["CHANGELOG.md", "Cargo.lock"]
