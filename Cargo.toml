@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rigol", "crates/rigol-mcp"]
+members = ["crates/rigol", "crates/rigol-mcp", "crates/rigol-fake"]
 
 [workspace.package]
 version = "0.1.0" # x-release-please-version
@@ -10,6 +10,7 @@ repository = "https://github.com/eljefedelrodeodeljefe/rigol-mcp"
 
 [workspace.dependencies]
 rigol = { path = "crates/rigol", version = "0.1.0" } # x-release-please-version
+rigol-fake = { path = "crates/rigol-fake" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
