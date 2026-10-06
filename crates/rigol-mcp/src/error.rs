@@ -13,7 +13,8 @@ pub fn tool_error(e: anyhow::Error) -> ErrorData {
             rigol::Error::LimitExceeded { .. }
             | rigol::Error::NoSuchChannel(_)
             | rigol::Error::NoSuchInput { .. }
-            | rigol::Error::OutOfRange { .. } => ErrorCode::INVALID_PARAMS,
+            | rigol::Error::OutOfRange { .. }
+            | rigol::Error::GeneratorLimit { .. } => ErrorCode::INVALID_PARAMS,
             // Misconfiguration, not a malfunction: RIGOL_FAMILY names one kind
             // of instrument and another one answered at RIGOL_HOST.
             rigol::Error::WrongInstrument { .. } => ErrorCode::INVALID_REQUEST,
