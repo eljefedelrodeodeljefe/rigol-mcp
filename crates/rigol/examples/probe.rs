@@ -1,14 +1,21 @@
 //! Read-only probe against a live instrument.
 //!
 //! Strictly sequential and strictly read-only: no setpoint is written, no output
-//! is energised. Never turn this into a sweep — an `nmap -p-` wedged this unit
-//! for ninety seconds.
+//! is energised, no acquisition setting is changed. Never turn this into a
+//! sweep — an `nmap -p-` wedged a DP832A for ninety seconds.
+//!
+//! Reads `*IDN?` first and probes according to the family that answers. For
+//! an oscilloscope it walks a fixed list of read-only queries from the
+//! DHO800/DHO900 Programming Guide, one at a time, draining the error queue
+//! after each, and prints a table of what this firmware accepts. An
+//! unsupported query on these scopes is not an error reply but silence, so
+//! each one is a timeout followed by a reconnect.
 //!
 //!   cargo run -p rigol --example probe -- <instrument-ip>
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use rigol::{Dp800, Limits, SessionConfig};
+use rigol::{DEFAULT_PORT, Dp800, Family, Identity, Limits, Session, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,9 +27,116 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     };
 
+    let session = Session::connect(format!("{host}:{DEFAULT_PORT}"), probe_cfg()).await?;
+    let raw = session.query("*IDN?").await?;
+    let identity =
+        Identity::parse(&raw).ok_or_else(|| format!("unparsable *IDN? reply: {raw:?}"))?;
+    match identity.family() {
+        Some(Family::Dp800) => probe_psu(&host).await,
+        Some(Family::Dho900) => probe_scope(&session, &identity).await,
+        None => {
+            println!(
+                "{raw}\nno device model for `{}` — nothing else sent",
+                identity.model
+            );
+            Ok(())
+        }
+    }
+}
+
+fn probe_cfg() -> SessionConfig {
+    SessionConfig {
+        timeout: Duration::from_secs(2),
+        ..SessionConfig::default()
+    }
+}
+
+/// Read-only DHO800/DHO900 queries, in Programming Guide spelling. Nothing
+/// here changes instrument state: every entry is a query.
+const SCOPE_QUERIES: &[&str] = &[
+    ":LAN:STATus?",
+    ":LAN:DHCP?",
+    ":LAN:IPADdress?",
+    ":LAN:SMASk?",
+    ":LAN:GATeway?",
+    ":LAN:MAC?",
+    ":TRIGger:STATus?",
+    ":TRIGger:MODE?",
+    ":TRIGger:SWEep?",
+    ":TRIGger:EDGE:SOURce?",
+    ":TRIGger:EDGE:SLOPe?",
+    ":TRIGger:EDGE:LEVel?",
+    ":TIMebase:MAIN:SCALe?",
+    ":TIMebase:MAIN:OFFSet?",
+    ":ACQuire:SRATe?",
+    ":ACQuire:MDEPth?",
+    ":ACQuire:TYPE?",
+    ":CHANnel1:DISPlay?",
+    ":CHANnel1:SCALe?",
+    ":CHANnel1:OFFSet?",
+    ":CHANnel1:COUPling?",
+    ":CHANnel1:PROBe?",
+    ":CHANnel1:BWLimit?",
+    ":CHANnel1:INVert?",
+    ":MEASure:ITEM? VPP,CHANnel1",
+    ":MEASure:ITEM? FREQuency,CHANnel1",
+    ":MEASure:ITEM? VRMS,CHANnel1",
+    ":WAVeform:SOURce?",
+    ":WAVeform:MODE?",
+    ":WAVeform:FORMat?",
+    ":WAVeform:POINts?",
+    ":WAVeform:PREamble?",
+];
+
+async fn probe_scope(
+    session: &Session,
+    identity: &Identity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "── {} {} ({}) firmware {} ──",
+        identity.vendor, identity.model, identity.serial, identity.firmware
+    );
+    session.clear_status().await?;
+
+    println!("\n| Query | Reply | Error queue after |");
+    println!("|---|---|---|");
+    for q in SCOPE_QUERIES {
+        let t = Instant::now();
+        let reply = match session.query(q).await {
+            Ok(r) => format!("`{r}` ({} ms)", t.elapsed().as_millis()),
+            Err(e) => format!("**no reply**: {e}"),
+        };
+        let errs = match session.errors().await {
+            Ok(v) if v.is_empty() => "clean".to_string(),
+            Ok(v) => v
+                .iter()
+                .map(|e| format!("{} {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+            Err(e) => format!("queue unreadable: {e}"),
+        };
+        println!("| `{q}` | {reply} | {errs} |");
+    }
+
+    let t = Instant::now();
+    match session.query_block(":DISPlay:DATA? PNG").await {
+        Ok(png) => println!(
+            "| `:DISPlay:DATA? PNG` | {} bytes, PNG signature {} ({} ms) | — |",
+            png.len(),
+            png.starts_with(b"\x89PNG"),
+            t.elapsed().as_millis()
+        ),
+        Err(e) => println!("| `:DISPlay:DATA? PNG` | **failed**: {e} | — |"),
+    }
+
+    println!("\ndone — queries only; no setting was changed.");
+    Ok(())
+}
+
+async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("── connecting to {host} ──");
     let t0 = Instant::now();
-    let psu = Dp800::connect(&host, None, SessionConfig::default(), Limits::new()).await?;
+    let psu = Dp800::connect(host, None, SessionConfig::default(), Limits::new()).await?;
     println!("connected in {:?}", t0.elapsed());
 
     let id = psu.identity();
