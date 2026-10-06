@@ -1,4 +1,4 @@
-use rigol::MeasureItem;
+use rigol::{Coupling, MeasureItem, Slope, Sweep};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -23,4 +23,50 @@ pub struct WaveformParams {
         description = "Most points to return (default 1000, capped at 10000). Longer captures are thinned to min/max pairs per bucket, so peaks survive; the statistics always cover every sample"
     )]
     pub max_points: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureChannelParams {
+    #[schemars(description = "Analog input channel, from 1 to the model's channel count")]
+    pub channel: u8,
+    #[schemars(description = "Show or hide the channel (:CHANnel<n>:DISPlay)")]
+    pub displayed: Option<bool>,
+    #[schemars(
+        description = "Vertical scale in volts per division (:CHANnel<n>:SCALe). 200 µV to 10 V at a 1x probe on a DHO900 (500 µV on a DHO800), multiplied by the probe ratio"
+    )]
+    pub volts_per_div: Option<f64>,
+    #[schemars(
+        description = "Vertical offset in volts (:CHANnel<n>:OFFSet). The allowed range depends on the scale; the scope decides and any objection is reported back"
+    )]
+    pub offset_volts: Option<f64>,
+    #[schemars(description = "Input coupling (:CHANnel<n>:COUPling)")]
+    pub coupling: Option<Coupling>,
+    #[schemars(
+        description = "Probe attenuation ratio (:CHANnel<n>:PROBe), e.g. 1 or 10. Must be one of 0.001, 0.002, 0.005 … 1, 2, 5, 10, 20, 50 … 50000. Applied before scale and offset, which it rescales"
+    )]
+    pub probe_ratio: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureTimebaseParams {
+    #[schemars(description = "Horizontal scale in seconds per division (:TIMebase:MAIN:SCALe)")]
+    pub seconds_per_div: Option<f64>,
+    #[schemars(
+        description = "Horizontal offset in seconds relative to the trigger (:TIMebase:MAIN:OFFSet)"
+    )]
+    pub offset_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureEdgeTriggerParams {
+    #[schemars(description = "Analog channel to trigger on (:TRIGger:EDGE:SOURce CHANnel<n>)")]
+    pub channel: Option<u8>,
+    #[schemars(description = "Edge to trigger on (:TRIGger:EDGE:SLOPe)")]
+    pub slope: Option<Slope>,
+    #[schemars(description = "Trigger level in volts (:TRIGger:EDGE:LEVel)")]
+    pub level_volts: Option<f64>,
+    #[schemars(
+        description = "auto free-runs without a trigger, normal waits for one, single acquires once and stops (:TRIGger:SWEep)"
+    )]
+    pub sweep: Option<Sweep>,
 }
