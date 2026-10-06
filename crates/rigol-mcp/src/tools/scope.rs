@@ -1,7 +1,7 @@
 //! Pure tool logic for the oscilloscope — no MCP types cross this boundary.
 
 use anyhow::Result;
-use rigol::{ChannelConfig, Dho900, EdgeTriggerConfig};
+use rigol::{ChannelConfig, Dho900, EdgeTriggerConfig, GeneratorConfig};
 use serde_json::{Value, json};
 
 use crate::params::*;
@@ -114,4 +114,30 @@ pub async fn configure_edge_trigger(
     Ok(serde_json::to_value(
         scope.configure_edge_trigger(&cfg).await?,
     )?)
+}
+
+// ── Signal generator ─────────────────────────────────────────────────────────
+
+pub async fn generator(scope: &Dho900) -> Result<Value> {
+    Ok(serde_json::to_value(scope.generator().await?)?)
+}
+
+pub async fn configure_generator(scope: &Dho900, p: &ConfigureGeneratorParams) -> Result<Value> {
+    let cfg = GeneratorConfig {
+        shape: p.shape,
+        frequency_hz: p.frequency_hz,
+        amplitude_vpp: p.amplitude_vpp,
+        offset_volts: p.offset_volts,
+    };
+    Ok(serde_json::to_value(
+        scope.configure_generator(&cfg).await?,
+    )?)
+}
+
+pub async fn generator_output_on(scope: &Dho900) -> Result<Value> {
+    Ok(serde_json::to_value(scope.generator_output_on().await?)?)
+}
+
+pub async fn generator_output_off(scope: &Dho900) -> Result<Value> {
+    Ok(serde_json::to_value(scope.generator_output_off().await?)?)
 }

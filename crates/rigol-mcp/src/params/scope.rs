@@ -1,4 +1,4 @@
-use rigol::{Coupling, MeasureItem, Slope, Sweep};
+use rigol::{Coupling, MeasureItem, Slope, Sweep, Waveshape};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -69,4 +69,24 @@ pub struct ConfigureEdgeTriggerParams {
         description = "auto free-runs without a trigger, normal waits for one, single acquires once and stops (:TRIGger:SWEep)"
     )]
     pub sweep: Option<Sweep>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureGeneratorParams {
+    #[schemars(
+        description = "Waveform (:SOURce:FUNCtion). dc outputs the offset as a constant level"
+    )]
+    pub shape: Option<Waveshape>,
+    #[schemars(
+        description = "Frequency in hertz (:SOURce:FREQuency): sine 2 mHz–25 MHz, square 2 mHz–15 MHz, ramp 2 mHz–150 kHz; not used by dc or noise"
+    )]
+    pub frequency_hz: Option<f64>,
+    #[schemars(
+        description = "Amplitude in volts peak-to-peak (:SOURce:VOLTage:AMPLitude): 2 mV–10 V, 5 V above 10 MHz, and never above RIGOL_GEN_MAX_VPP"
+    )]
+    pub amplitude_vpp: Option<f64>,
+    #[schemars(
+        description = "DC offset in volts (:SOURce:VOLTage:OFFSet). |offset| + amplitude/2 must stay within RIGOL_GEN_MAX_PEAK_VOLTS"
+    )]
+    pub offset_volts: Option<f64>,
 }

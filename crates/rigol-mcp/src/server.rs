@@ -1,6 +1,6 @@
 use anyhow::Context;
 use base64::Engine;
-use rigol::{Dho900, Dp800, Family, Limits, SessionConfig};
+use rigol::{Dho900, Dp800, Family, GeneratorLimits, Limits, SessionConfig};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -25,6 +25,9 @@ pub struct RigolServer {
     port: Option<u16>,
     cfg: SessionConfig,
     configured_limits: Limits,
+    /// Ceilings for the scope's signal generator. The hardware range unless
+    /// tightened with RIGOL_GEN_MAX_VPP and RIGOL_GEN_MAX_PEAK_VOLTS.
+    generator_limits: GeneratorLimits,
     writes_enabled: bool,
     /// Connected on first use. Two concurrent sessions were verified to coexist
     /// on this instrument, and a session survives idle, so holding one open is
@@ -73,9 +76,21 @@ impl RigolServer {
             }
         }
 
+        let generator_limits = match (
+            env_f64("RIGOL_GEN_MAX_VPP")?,
+            env_f64("RIGOL_GEN_MAX_PEAK_VOLTS")?,
+        ) {
+            (Some(vpp), Some(peak)) => GeneratorLimits::new(vpp, peak)?,
+            (None, None) => GeneratorLimits::default(),
+            _ => {
+                anyhow::bail!("RIGOL_GEN_MAX_VPP and RIGOL_GEN_MAX_PEAK_VOLTS must be set together")
+            }
+        };
+
         Ok(Self {
             family,
             tool_router: Self::router_for(family),
+            generator_limits,
             host,
             port,
             cfg: SessionConfig {
@@ -113,6 +128,7 @@ impl RigolServer {
             port: Some(addr.port()),
             cfg: SessionConfig::default(),
             configured_limits: Limits::new(),
+            generator_limits: GeneratorLimits::default(),
             writes_enabled: false,
             psu: OnceCell::new(),
             scope: OnceCell::new(),
@@ -132,7 +148,9 @@ impl RigolServer {
     async fn scope(&self) -> Result<&Dho900, ErrorData> {
         self.scope
             .get_or_try_init(|| async {
-                Dho900::connect(&self.host, self.port, self.cfg.clone()).await
+                Dho900::connect(&self.host, self.port, self.cfg.clone())
+                    .await
+                    .map(|scope| scope.with_generator_limits(self.generator_limits))
             })
             .await
             .map_err(|e| tool_error(e.into()))
@@ -527,6 +545,58 @@ impl RigolServer {
             .map_err(tool_error)?;
         Ok(Self::ok(&data))
     }
+
+    // ── Signal generator ──────────────────────────────────────────────────────
+    //
+    // Unlike the rest of the scope, this drives a signal into the device under
+    // test. It follows the PSU's rules: configuring never energises, ceilings
+    // are enforced in the library, output-on is explicit and logged.
+
+    #[tool(
+        description = "Get the built-in signal generator's state: output on/off, waveform, frequency, amplitude, offset, peak excursion, and the ceilings in force (:SOURce:OUTPut:STATe? :FUNCtion? :FREQuency? :VOLTage:AMPLitude? :VOLTage:OFFSet?)"
+    )]
+    async fn get_generator(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::generator(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Set the signal generator's waveform, frequency, amplitude and/or offset (:SOURce:FUNCtion / :FREQuency / :VOLTage:AMPLitude / :VOLTage:OFFSet). Does NOT turn the output on. Refused if amplitude or the peak |offset| + amplitude/2 would exceed the ceilings. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_generator(
+        &self,
+        Parameters(p): Parameters<ConfigureGeneratorParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_generator(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Turn the signal generator's output ON (:SOURce:OUTPut:STATe ON). This drives a signal into whatever is connected. The current settings are checked against the ceilings first. Confirm with the user before calling. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn generator_output_on(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::generator_output_on(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Turn the signal generator's output OFF (:SOURce:OUTPut:STATe OFF). Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn generator_output_off(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::generator_output_off(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -556,7 +626,10 @@ const PSU_INSTRUCTIONS: &str = concat!(
 const SCOPE_INSTRUCTIONS: &str = concat!(
     "RIGOL DHO800/DHO900-series oscilloscope control over SCPI (raw TCP socket). ",
     "Configure with RIGOL_HOST and RIGOL_FAMILY=dho900. Optional: RIGOL_PORT (default 5555), ",
-    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false). ",
+    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false), and signal-generator ",
+    "ceilings RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS (default: the generator's own 10 Vpp / 5 V). ",
+    "The built-in signal generator drives real hardware: configuring it and turning its output on ",
+    "are separate operations, and settings over the ceilings are refused before they reach the scope. ",
     "Start with get_screenshot to see the instrument's state, then get_status for exact values. ",
     "Measurements that the current signal does not support return a null value.",
 );
@@ -620,7 +693,11 @@ mod tests {
                 "clear_measurements",
                 "configure_channel",
                 "configure_edge_trigger",
+                "configure_generator",
                 "configure_timebase",
+                "generator_output_off",
+                "generator_output_on",
+                "get_generator",
                 "get_identity",
                 "get_instrument_errors",
                 "get_lan_config",
