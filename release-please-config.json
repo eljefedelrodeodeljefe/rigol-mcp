@@ -16,7 +16,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name==='rigol' || @.name==='rigol-mcp')].version"
+          "jsonpath": "$.package[?(@.name==='rigol' || @.name==='rigol-mcp' || @.name==='rigol-fake')].version"
         },
         {
           "type": "generic",
