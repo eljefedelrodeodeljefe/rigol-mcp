@@ -21,10 +21,21 @@
 
 use std::time::{Duration, Instant};
 
+use tracing_subscriber::EnvFilter;
+
 use rigol::{DEFAULT_PORT, Dp800, Family, Identity, Limits, Session, SessionConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The report is log output: `RUST_LOG=warn` keeps only refusals and failures.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .without_time()
+        .init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let write = args.iter().any(|a| a == "--write");
     let host = args
@@ -33,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .or_else(|| std::env::var("RIGOL_HOST").ok());
     let Some(host) = host else {
-        eprintln!("usage: probe <instrument-ip> [--write]   (or set RIGOL_HOST)");
+        tracing::error!("usage: probe <instrument-ip> [--write]   (or set RIGOL_HOST)");
         std::process::exit(2);
     };
 
@@ -51,8 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         None => {
-            println!(
-                "{raw}\nno device model for `{}` — nothing else sent",
+            tracing::info!(
+                "{raw}: no device model for `{}` — nothing else sent",
                 identity.model
             );
             Ok(())
@@ -178,14 +189,17 @@ async fn probe_scope(
     session: &Session,
     identity: &Identity,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    tracing::info!(
         "── {} {} ({}) firmware {} ──",
-        identity.vendor, identity.model, identity.serial, identity.firmware
+        identity.vendor,
+        identity.model,
+        identity.serial,
+        identity.firmware
     );
     session.clear_status().await?;
 
-    println!("\n| Query | Reply | Error queue after |");
-    println!("|---|---|---|");
+    tracing::info!("| Query | Reply | Error queue after |");
+    tracing::info!("|---|---|---|");
     for q in SCOPE_QUERIES {
         let t = Instant::now();
         let reply = match session.query(q).await {
@@ -193,29 +207,29 @@ async fn probe_scope(
             Err(e) => format!("**no reply**: {e}"),
         };
         let errs = describe_errors(session).await;
-        println!("| `{q}` | {reply} | {errs} |");
+        tracing::info!("| `{q}` | {reply} | {errs} |");
     }
 
     let t = Instant::now();
     match session.query_block(":DISPlay:DATA? PNG").await {
-        Ok(png) => println!(
+        Ok(png) => tracing::info!(
             "| `:DISPlay:DATA? PNG` | {} bytes, PNG signature {} ({} ms) | — |",
             png.len(),
             png.starts_with(b"\x89PNG"),
             t.elapsed().as_millis()
         ),
-        Err(e) => println!("| `:DISPlay:DATA? PNG` | **failed**: {e} | — |"),
+        Err(e) => tracing::info!("| `:DISPlay:DATA? PNG` | **failed**: {e} | — |"),
     }
 
-    println!("\ndone — queries only; no setting was changed.");
+    tracing::info!("done — queries only; no setting was changed.");
     Ok(())
 }
 
 async fn probe_scope_writes(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n── --write: set, read back, restore ──");
+    tracing::info!("── --write: set, read back, restore ──");
     session.clear_status().await?;
-    println!("\n| Command | Before | After | Error queue after |");
-    println!("|---|---|---|---|");
+    tracing::info!("| Command | Before | After | Error queue after |");
+    tracing::info!("|---|---|---|---|");
     let mut undo = Vec::new();
     for c in SCOPE_WRITES {
         let before = match c.query {
@@ -228,7 +242,7 @@ async fn probe_scope_writes(session: &Session) -> Result<(), Box<dyn std::error:
             None => None,
         };
         let errs = describe_errors(session).await;
-        println!(
+        tracing::info!(
             "| `{}` | {} | {} | {errs} |",
             c.set,
             show(before.as_deref()),
@@ -243,14 +257,14 @@ async fn probe_scope_writes(session: &Session) -> Result<(), Box<dyn std::error:
         }
     }
 
-    println!("\n| Restore | Error queue after |");
-    println!("|---|---|");
+    tracing::info!("| Restore | Error queue after |");
+    tracing::info!("|---|---|");
     for cmd in undo.iter().rev() {
         session.command(cmd).await?;
         let errs = describe_errors(session).await;
-        println!("| `{cmd}` | {errs} |");
+        tracing::info!("| `{cmd}` | {errs} |");
     }
-    println!("\ndone — every setting checked was put back.");
+    tracing::info!("done — every setting checked was put back.");
     Ok(())
 }
 
@@ -271,24 +285,24 @@ async fn describe_errors(session: &Session) -> String {
 }
 
 async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("── connecting to {host} ──");
+    tracing::info!("── connecting to {host} ──");
     let t0 = Instant::now();
     let psu = Dp800::connect(host, None, SessionConfig::default(), Limits::new()).await?;
-    println!("connected in {:?}", t0.elapsed());
+    tracing::info!("connected in {:?}", t0.elapsed());
 
     let id = psu.identity();
-    println!("\n── identity ──");
-    println!("  vendor   {}", id.vendor);
-    println!("  model    {}", id.model);
-    println!("  serial   {}", id.serial);
-    println!("  firmware {}", id.firmware);
+    tracing::info!("── identity ──");
+    tracing::info!("  vendor   {}", id.vendor);
+    tracing::info!("  model    {}", id.model);
+    tracing::info!("  serial   {}", id.serial);
+    tracing::info!("  firmware {}", id.firmware);
 
-    println!("\n── channels (rating, setpoint, measured, output) ──");
+    tracing::info!("── channels (rating, setpoint, measured, output) ──");
     for ch in 1..=3u8 {
         let c = psu.channel(ch).await?;
         let m = psu.measure(ch).await?;
         let o = psu.output_state(ch).await?;
-        println!(
+        tracing::info!(
             "  CH{ch}  rated {:>5.1}V/{:.1}A   set {:>6.3}V/{:.3}A   meas {:>6.4}V/{:.4}A/{:.3}W   output {:?}",
             c.rating.volts,
             c.rating.amps,
@@ -301,56 +315,61 @@ async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    println!("\n── resolved safety ceilings (backfilled from ratings) ──");
+    tracing::info!("── resolved safety ceilings (backfilled from ratings) ──");
     for ch in 1..=3u8 {
         let r = psu.limits().ceiling(ch)?;
-        println!("  CH{ch}  max {:.1}V / {:.1}A", r.volts, r.amps);
+        tracing::info!("  CH{ch}  max {:.1}V / {:.1}A", r.volts, r.amps);
     }
 
-    println!("\n── open question 2: protection subsystem ──");
+    tracing::info!("── open question 2: protection subsystem ──");
     for ch in 1..=3u8 {
         let p = psu.protection(ch).await?;
-        println!(
+        tracing::info!(
             "  CH{ch}  ovp={:?} @ {:?}V tripped={:?}   ocp={:?} @ {:?}A tripped={:?}",
-            p.ovp_enabled, p.ovp_volts, p.ovp_tripped, p.ocp_enabled, p.ocp_amps, p.ocp_tripped
+            p.ovp_enabled,
+            p.ovp_volts,
+            p.ovp_tripped,
+            p.ocp_enabled,
+            p.ocp_amps,
+            p.ocp_tripped
         );
     }
 
-    println!("\n── LAN subsystem (capability-probed) ──");
+    tracing::info!("── LAN subsystem (capability-probed) ──");
     let lan = psu.lan_config().await?;
-    println!("  mac       {:?}", lan.mac);
-    println!("  ip        {:?}", lan.ip);
-    println!("  mask      {:?}", lan.mask);
-    println!("  gateway   {:?}", lan.gateway);
-    println!("  dns       {:?}", lan.dns);
-    println!("  dhcp      {:?}", lan.dhcp);
-    println!("  auto-ip   {:?}", lan.auto_ip);
-    println!("  manual-ip {:?}", lan.manual_ip);
-    println!("  answered  {} of 8 queries", lan.supported_queries.len());
+    tracing::info!("  mac       {:?}", lan.mac);
+    tracing::info!("  ip        {:?}", lan.ip);
+    tracing::info!("  mask      {:?}", lan.mask);
+    tracing::info!("  gateway   {:?}", lan.gateway);
+    tracing::info!("  dns       {:?}", lan.dns);
+    tracing::info!("  dhcp      {:?}", lan.dhcp);
+    tracing::info!("  auto-ip   {:?}", lan.auto_ip);
+    tracing::info!("  manual-ip {:?}", lan.manual_ip);
+    tracing::info!("  answered  {} of 8 queries", lan.supported_queries.len());
 
-    println!("\n── latency of a single query (open question: timeout budget) ──");
+    tracing::info!("── latency of a single query (open question: timeout budget) ──");
     for i in 1..=3 {
         let t = Instant::now();
         let _ = psu.session().query("*IDN?").await?;
-        println!("  *IDN? #{i}  {:?}", t.elapsed());
+        tracing::info!("  *IDN? #{i}  {:?}", t.elapsed());
     }
 
-    println!("\n── error queue ──");
+    tracing::info!("── error queue ──");
     let errs = psu.errors().await?;
     if errs.is_empty() {
-        println!("  clean");
+        tracing::info!("  clean");
     } else {
         for e in errs {
-            println!("  {} {}", e.code, e.message);
+            tracing::info!("  {} {}", e.code, e.message);
         }
     }
 
-    println!("\n── safety check (no write is sent — the library refuses first) ──");
+    tracing::info!("── safety check (no write is sent — the library refuses first) ──");
     match psu.set_voltage(3, 30.0).await {
-        Err(e) => println!("  30V on CH3 (rated 5V): refused — {e}"),
-        Ok(()) => println!("  !! CH3 accepted 30V — the ceiling is not working"),
+        Err(e) => tracing::info!("  30V on CH3 (rated 5V): refused — {e}"),
+        Ok(()) => tracing::error!("  CH3 accepted 30V — the ceiling is not working"),
     }
 
-    println!("\ndone — nothing was written, no output was energised.");
+    tracing::info!("done — nothing was written, no output was energised.");
     Ok(())
 }

@@ -20,7 +20,10 @@ serde_json = { workspace = true }
 schemars = "1.0"
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rigol-fake = { workspace = true }
+
+[lints]
+workspace = true
