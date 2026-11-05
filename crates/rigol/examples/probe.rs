@@ -1,8 +1,8 @@
 //! Read-only probe against a live instrument.
 //!
-//! Strictly sequential and strictly read-only: no setpoint is written, no output
-//! is energised, no acquisition setting is changed. Never turn this into a
-//! sweep — an `nmap -p-` wedged a DP832A for ninety seconds.
+//! Strictly sequential and, by default, strictly read-only: no setpoint is
+//! written, no output is energised, no acquisition setting is changed. Never
+//! turn this into a sweep — an `nmap -p-` wedged a DP832A for ninety seconds.
 //!
 //! Reads `*IDN?` first and probes according to the family that answers. For
 //! an oscilloscope it walks a fixed list of read-only queries from the
@@ -11,7 +11,13 @@
 //! unsupported query on these scopes is not an error reply but silence, so
 //! each one is a timeout followed by a reconnect.
 //!
-//!   cargo run -p rigol --example probe -- <instrument-ip>
+//! With `--write`, and only for an oscilloscope, it then checks a fixed list
+//! of display, trigger and logic-analyser set commands, again in Programming
+//! Guide spelling: read the setting, set it, read it back, drain the error
+//! queue, and finally put every setting back as it was. Nothing in that list
+//! touches the signal generator.
+//!
+//!   cargo run -p rigol --example probe -- <instrument-ip> [--write]
 
 use std::time::{Duration, Instant};
 
@@ -19,11 +25,15 @@ use rigol::{DEFAULT_PORT, Dp800, Family, Identity, Limits, Session, SessionConfi
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let write = args.iter().any(|a| a == "--write");
+    let host = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
         .or_else(|| std::env::var("RIGOL_HOST").ok());
     let Some(host) = host else {
-        eprintln!("usage: probe <instrument-ip>   (or set RIGOL_HOST)");
+        eprintln!("usage: probe <instrument-ip> [--write]   (or set RIGOL_HOST)");
         std::process::exit(2);
     };
 
@@ -33,7 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Identity::parse(&raw).ok_or_else(|| format!("unparsable *IDN? reply: {raw:?}"))?;
     match identity.family() {
         Some(Family::Dp800) => probe_psu(&host).await,
-        Some(Family::Dho900) => probe_scope(&session, &identity).await,
+        Some(Family::Dho900) => {
+            probe_scope(&session, &identity).await?;
+            if write {
+                probe_scope_writes(&session).await?;
+            }
+            Ok(())
+        }
         None => {
             println!(
                 "{raw}\nno device model for `{}` — nothing else sent",
@@ -91,6 +107,71 @@ const SCOPE_QUERIES: &[&str] = &[
     ":SOURce:FREQuency?",
     ":SOURce:VOLTage:AMPLitude?",
     ":SOURce:VOLTage:OFFSet?",
+    ":MEASure:STATistic:DISPlay?",
+    ":MEASure:STATistic:COUNt?",
+    ":MEASure:STATistic:ITEM? CURRent,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? MINimum,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? MAXimum,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? AVERages,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? DEViation,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? CNT,VPP,CHANnel1",
+    ":LA:ENABle?",
+    ":LA:DIGital:ENABle? D0",
+    ":LA:DIGital:ENABle? D15",
+    ":LA:POD1:DISPlay?",
+    ":LA:POD2:DISPlay?",
+    ":LA:POD1:THReshold?",
+    ":LA:POD2:THReshold?",
+];
+
+/// One set command to check with `--write`: `query` reads the setting before
+/// and after, `set` changes it, and `restore` followed by the value read
+/// before puts it back. Without a query the command is only sent and the
+/// error queue checked. `volts_e18` marks a reply in volts times 1e18, as
+/// this firmware gives for logic-analyser thresholds (1.65 V reads back as
+/// `1.650000E+18`); it is scaled back before being sent as the restore.
+struct WriteCheck {
+    set: &'static str,
+    query: Option<&'static str>,
+    restore: &'static str,
+    volts_e18: bool,
+}
+
+/// Display, trigger and logic-analyser settings only, in Programming Guide
+/// spelling. The signal generator is deliberately absent, and so is
+/// `:LA:ENABle 0`: turning the analyser back on shows D0–D7 only, so the
+/// probe could not put back which channels were shown.
+const SCOPE_WRITES: &[WriteCheck] = &[
+    WriteCheck {
+        set: ":MEASure:STATistic:RESet",
+        query: None,
+        restore: "",
+        volts_e18: false,
+    },
+    WriteCheck {
+        set: ":LA:DIGital:ENABle D12,0",
+        query: Some(":LA:DIGital:ENABle? D12"),
+        restore: ":LA:DIGital:ENABle D12,",
+        volts_e18: false,
+    },
+    WriteCheck {
+        set: ":LA:POD1:THReshold 2.5",
+        query: Some(":LA:POD1:THReshold?"),
+        restore: ":LA:POD1:THReshold ",
+        volts_e18: true,
+    },
+    WriteCheck {
+        set: ":LA:POD2:THReshold 2.5",
+        query: Some(":LA:POD2:THReshold?"),
+        restore: ":LA:POD2:THReshold ",
+        volts_e18: true,
+    },
+    WriteCheck {
+        set: ":TRIGger:EDGE:SOURce D0",
+        query: Some(":TRIGger:EDGE:SOURce?"),
+        restore: ":TRIGger:EDGE:SOURce ",
+        volts_e18: false,
+    },
 ];
 
 async fn probe_scope(
@@ -111,15 +192,7 @@ async fn probe_scope(
             Ok(r) => format!("`{r}` ({} ms)", t.elapsed().as_millis()),
             Err(e) => format!("**no reply**: {e}"),
         };
-        let errs = match session.errors().await {
-            Ok(v) if v.is_empty() => "clean".to_string(),
-            Ok(v) => v
-                .iter()
-                .map(|e| format!("{} {}", e.code, e.message))
-                .collect::<Vec<_>>()
-                .join("; "),
-            Err(e) => format!("queue unreadable: {e}"),
-        };
+        let errs = describe_errors(session).await;
         println!("| `{q}` | {reply} | {errs} |");
     }
 
@@ -136,6 +209,65 @@ async fn probe_scope(
 
     println!("\ndone — queries only; no setting was changed.");
     Ok(())
+}
+
+async fn probe_scope_writes(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n── --write: set, read back, restore ──");
+    session.clear_status().await?;
+    println!("\n| Command | Before | After | Error queue after |");
+    println!("|---|---|---|---|");
+    let mut undo = Vec::new();
+    for c in SCOPE_WRITES {
+        let before = match c.query {
+            Some(q) => Some(session.query(q).await?),
+            None => None,
+        };
+        session.command(c.set).await?;
+        let after = match c.query {
+            Some(q) => Some(session.query(q).await?),
+            None => None,
+        };
+        let errs = describe_errors(session).await;
+        println!(
+            "| `{}` | {} | {} | {errs} |",
+            c.set,
+            show(before.as_deref()),
+            show(after.as_deref())
+        );
+        if let Some(b) = before {
+            let value = match b.trim().parse::<f64>() {
+                Ok(v) if c.volts_e18 && v.abs() > 1e3 => (v / 1e18).to_string(),
+                _ => b,
+            };
+            undo.push(format!("{}{value}", c.restore));
+        }
+    }
+
+    println!("\n| Restore | Error queue after |");
+    println!("|---|---|");
+    for cmd in undo.iter().rev() {
+        session.command(cmd).await?;
+        let errs = describe_errors(session).await;
+        println!("| `{cmd}` | {errs} |");
+    }
+    println!("\ndone — every setting checked was put back.");
+    Ok(())
+}
+
+fn show(reply: Option<&str>) -> String {
+    reply.map_or_else(|| "—".to_string(), |r| format!("`{r}`"))
+}
+
+async fn describe_errors(session: &Session) -> String {
+    match session.errors().await {
+        Ok(v) if v.is_empty() => "clean".to_string(),
+        Ok(v) => v
+            .iter()
+            .map(|e| format!("{} {}", e.code, e.message))
+            .collect::<Vec<_>>()
+            .join("; "),
+        Err(e) => format!("queue unreadable: {e}"),
+    }
 }
 
 async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,4 +1,4 @@
-use rigol::{Coupling, MeasureItem, Slope, Sweep, Waveshape};
+use rigol::{Coupling, DigitalChannel, MeasureItem, Slope, Sweep, Waveshape};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -59,8 +59,14 @@ pub struct ConfigureTimebaseParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ConfigureEdgeTriggerParams {
-    #[schemars(description = "Analog channel to trigger on (:TRIGger:EDGE:SOURce CHANnel<n>)")]
+    #[schemars(
+        description = "Analog channel to trigger on (:TRIGger:EDGE:SOURce CHANnel<n>). Give this or digital, not both"
+    )]
     pub channel: Option<u8>,
+    #[schemars(
+        description = "Digital channel D0–D15 to trigger on (:TRIGger:EDGE:SOURce D<n>), DHO900 series only. The trigger level then sets the switching threshold for that edge, -20 V to 20 V. Give this or channel, not both"
+    )]
+    pub digital: Option<DigitalChannel>,
     #[schemars(description = "Edge to trigger on (:TRIGger:EDGE:SLOPe)")]
     pub slope: Option<Slope>,
     #[schemars(description = "Trigger level in volts (:TRIGger:EDGE:LEVel)")]
@@ -89,4 +95,24 @@ pub struct ConfigureGeneratorParams {
         description = "DC offset in volts (:SOURce:VOLTage:OFFSet). |offset| + amplitude/2 must stay within RIGOL_GEN_MAX_PEAK_VOLTS"
     )]
     pub offset_volts: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureLogicAnalyzerParams {
+    #[schemars(
+        description = "Turn the logic analyser on or off (:LA:ENABle). Turning it on shows D0–D7 again, whatever was shown before"
+    )]
+    pub enabled: Option<bool>,
+    #[schemars(description = "Digital channels to show (:LA:DIGital:ENABle D<n>,1)")]
+    pub show: Option<Vec<DigitalChannel>>,
+    #[schemars(description = "Digital channels to hide (:LA:DIGital:ENABle D<n>,0)")]
+    pub hide: Option<Vec<DigitalChannel>>,
+    #[schemars(
+        description = "Logic threshold for D0–D7 in volts (:LA:POD1:THReshold), -15 to 15. 1.65 suits 3.3 V logic"
+    )]
+    pub pod1_threshold_volts: Option<f64>,
+    #[schemars(
+        description = "Logic threshold for D8–D15 in volts (:LA:POD2:THReshold), -15 to 15"
+    )]
+    pub pod2_threshold_volts: Option<f64>,
 }

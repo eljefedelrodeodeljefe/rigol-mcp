@@ -1,7 +1,7 @@
 //! Pure tool logic for the oscilloscope — no MCP types cross this boundary.
 
 use anyhow::Result;
-use rigol::{ChannelConfig, Dho900, EdgeTriggerConfig, GeneratorConfig};
+use rigol::{ChannelConfig, Dho900, EdgeTriggerConfig, GeneratorConfig, LogicAnalyzerConfig};
 use serde_json::{Value, json};
 
 use crate::params::*;
@@ -27,6 +27,12 @@ pub async fn status(scope: &Dho900) -> Result<Value> {
 pub async fn measure(scope: &Dho900, p: &MeasureParams) -> Result<Value> {
     Ok(serde_json::to_value(
         scope.measure(p.item, p.channel).await?,
+    )?)
+}
+
+pub async fn measure_statistics(scope: &Dho900, p: &MeasureParams) -> Result<Value> {
+    Ok(serde_json::to_value(
+        scope.measure_statistics(p.item, p.channel).await?,
     )?)
 }
 
@@ -80,6 +86,11 @@ pub async fn clear_measurements(scope: &Dho900) -> Result<Value> {
     Ok(json!({ "sent": ":MEASure:CLEar" }))
 }
 
+pub async fn reset_measurement_statistics(scope: &Dho900) -> Result<Value> {
+    let errors = scope.reset_measurement_statistics().await?;
+    Ok(json!({ "sent": ":MEASure:STATistic:RESet", "instrument_errors": errors }))
+}
+
 pub async fn configure_channel(scope: &Dho900, p: &ConfigureChannelParams) -> Result<Value> {
     let cfg = ChannelConfig {
         displayed: p.displayed,
@@ -107,12 +118,35 @@ pub async fn configure_edge_trigger(
 ) -> Result<Value> {
     let cfg = EdgeTriggerConfig {
         channel: p.channel,
+        digital: p.digital,
         slope: p.slope,
         level_volts: p.level_volts,
         sweep: p.sweep,
     };
     Ok(serde_json::to_value(
         scope.configure_edge_trigger(&cfg).await?,
+    )?)
+}
+
+// ── Logic analyser ───────────────────────────────────────────────────────────
+
+pub async fn logic_analyzer(scope: &Dho900) -> Result<Value> {
+    Ok(serde_json::to_value(scope.logic_analyzer().await?)?)
+}
+
+pub async fn configure_logic_analyzer(
+    scope: &Dho900,
+    p: &ConfigureLogicAnalyzerParams,
+) -> Result<Value> {
+    let cfg = LogicAnalyzerConfig {
+        enabled: p.enabled,
+        show: p.show.clone().unwrap_or_default(),
+        hide: p.hide.clone().unwrap_or_default(),
+        pod1_threshold_volts: p.pod1_threshold_volts,
+        pod2_threshold_volts: p.pod2_threshold_volts,
+    };
+    Ok(serde_json::to_value(
+        scope.configure_logic_analyzer(&cfg).await?,
     )?)
 }
 

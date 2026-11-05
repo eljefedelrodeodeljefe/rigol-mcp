@@ -420,6 +420,19 @@ impl RigolServer {
     }
 
     #[tool(
+        description = "Get the statistics the scope keeps for one measurement on a channel: current, minimum, maximum, average, standard deviation and count of readings (:MEASure:STATistic:ITEM? CURRent|MINimum|MAXimum|AVERages|DEViation|CNT,<item>,CHANnel<n>). They cover every reading since the item was added or since reset_measurement_statistics. A value is null when the scope has no reading for it. Like measure, this adds the item to the on-screen measurement list if it is not there yet, and its statistics start from that reading"
+    )]
+    async fn measure_statistics(
+        &self,
+        Parameters(p): Parameters<MeasureParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::measure_statistics(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
         description = "Capture the oscilloscope screen as a PNG image (:DISPlay:DATA? PNG). The quickest way to see the instrument's whole state at once"
     )]
     async fn get_screenshot(&self) -> Result<CallToolResult, ErrorData> {
@@ -505,6 +518,17 @@ impl RigolServer {
     }
 
     #[tool(
+        description = "Clear the statistics history of every measurement item and start counting again (:MEASure:STATistic:RESet). The items stay in the on-screen list. Returns any errors the scope raised. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn reset_measurement_statistics(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::reset_measurement_statistics(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
         description = "Change a channel's vertical setup: display, scale, offset, coupling, probe ratio (:CHANnel<n>:…). Omitted fields are left alone. Returns the setup the scope actually holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn configure_channel(
@@ -533,7 +557,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:…, :TRIGger:SWEep). Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:SOURce CHANnel<n>|D<n>, :TRIGger:EDGE:SLOPe, :TRIGger:EDGE:LEVel, :TRIGger:SWEep). The source is an analog channel or, on the DHO900 series, a digital channel D0–D15. Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn configure_edge_trigger(
         &self,
@@ -541,6 +565,32 @@ impl RigolServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.guard_write()?;
         let data = tools::scope::configure_edge_trigger(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    // ── Logic analyser (DHO900 series only) ───────────────────────────────────
+
+    #[tool(
+        description = "Get the logic analyser's state: on or off, the POD1 (D0–D7) and POD2 (D8–D15) logic thresholds in volts, and which of D0–D15 are shown (:LA:ENABle? :LA:POD<n>:THReshold? :LA:DIGital:ENABle? D<n>). DHO900 series only"
+    )]
+    async fn get_logic_analyzer(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::logic_analyzer(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Turn the logic analyser on or off, show or hide digital channels D0–D15, and set the pod logic thresholds (:LA:ENABle, :LA:DIGital:ENABle D<n>,<bool>, :LA:POD<n>:THReshold). Omitted fields are left alone. Turning the analyser on shows D0–D7 again, so list any other channels in show in the same call. Returns what the scope holds afterwards plus any errors it raised. DHO900 series only. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_logic_analyzer(
+        &self,
+        Parameters(p): Parameters<ConfigureLogicAnalyzerParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_logic_analyzer(self.scope().await?, &p)
             .await
             .map_err(tool_error)?;
         Ok(Self::ok(&data))
@@ -694,6 +744,7 @@ mod tests {
                 "configure_channel",
                 "configure_edge_trigger",
                 "configure_generator",
+                "configure_logic_analyzer",
                 "configure_timebase",
                 "generator_output_off",
                 "generator_output_on",
@@ -701,10 +752,13 @@ mod tests {
                 "get_identity",
                 "get_instrument_errors",
                 "get_lan_config",
+                "get_logic_analyzer",
                 "get_screenshot",
                 "get_status",
                 "get_waveform",
                 "measure",
+                "measure_statistics",
+                "reset_measurement_statistics",
                 "run",
                 "single",
                 "stop",

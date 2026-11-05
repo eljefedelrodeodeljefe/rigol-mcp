@@ -42,6 +42,15 @@ pub enum Error {
     #[error("channel {channel} does not exist (this instrument has channels 1-{count})")]
     NoSuchInput { channel: u8, count: u8 },
 
+    /// A feature this model does not have, refused before anything is sent:
+    /// on DHO firmware a command for it would go unanswered.
+    #[error("refused: {what} is not available on the {model}")]
+    NotOnThisModel { what: &'static str, model: String },
+
+    /// Two arguments that cannot both apply, such as two trigger sources.
+    #[error("refused: {0}")]
+    Conflicting(&'static str),
+
     /// A setting outside what the instrument accepts, refused before it is
     /// sent.
     #[error("refused: {what} {value} is out of range (allowed: {allowed})")]

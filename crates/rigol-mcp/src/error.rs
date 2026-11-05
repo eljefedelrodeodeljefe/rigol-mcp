@@ -14,6 +14,8 @@ pub fn tool_error(e: anyhow::Error) -> ErrorData {
             | rigol::Error::NoSuchChannel(_)
             | rigol::Error::NoSuchInput { .. }
             | rigol::Error::OutOfRange { .. }
+            | rigol::Error::NotOnThisModel { .. }
+            | rigol::Error::Conflicting(_)
             | rigol::Error::GeneratorLimit { .. } => ErrorCode::INVALID_PARAMS,
             // Misconfiguration, not a malfunction: RIGOL_FAMILY names one kind
             // of instrument and another one answered at RIGOL_HOST.

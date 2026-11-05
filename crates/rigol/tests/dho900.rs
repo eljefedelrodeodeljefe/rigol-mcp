@@ -2,8 +2,9 @@
 //! captured from a DHO924S on firmware 00.01.05.
 
 use rigol::{
-    ChannelConfig, Coupling, Dho900, EdgeTriggerConfig, Error, Family, GeneratorConfig,
-    GeneratorLimits, MeasureItem, SessionConfig, Slope, Sweep, Waveshape,
+    ChannelConfig, Coupling, Dho900, DigitalChannel, EdgeTriggerConfig, Error, Family,
+    GeneratorConfig, GeneratorLimits, LogicAnalyzerConfig, MeasureItem, SessionConfig, Slope,
+    Sweep, Waveshape,
 };
 use rigol_fake::{Fake, Reply, Step, step};
 
@@ -325,6 +326,7 @@ async fn an_edge_trigger_change_uses_guide_spellings() {
     let applied = scope
         .configure_edge_trigger(&EdgeTriggerConfig {
             channel: Some(2),
+            digital: None,
             slope: Some(Slope::Falling),
             level_volts: Some(1.5),
             sweep: Some(Sweep::Single),
@@ -334,6 +336,234 @@ async fn an_edge_trigger_change_uses_guide_spellings() {
 
     assert_eq!(applied.state.source, "CHAN2");
     assert_eq!(applied.state.level_volts, 1.5);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn an_edge_trigger_can_watch_a_digital_channel() {
+    // Captured from a DHO924S (00.01.05) with a PLA2216 probe on D0; the
+    // level reply format is the one :TRIGger:EDGE:LEVel? gives for 0.4 V,
+    // 4.000000E-1.
+    let (fake, scope) = connect(vec![
+        step("*CLS", Reply::None),
+        step(":TRIGger:MODE EDGE", Reply::None),
+        step(":TRIGger:EDGE:SOURce D0", Reply::None),
+        step(":TRIGger:EDGE:SLOPe NEGative", Reply::None),
+        step(":TRIGger:EDGE:LEVel 1.65", Reply::None),
+        step(":TRIGger:MODE?", Reply::line("EDGE")),
+        step(":TRIGger:EDGE:SOURce?", Reply::line("D0")),
+        step(":TRIGger:EDGE:SLOPe?", Reply::line("NEG")),
+        step(":TRIGger:EDGE:LEVel?", Reply::line("1.650000E0")),
+        step(":TRIGger:SWEep?", Reply::line("NORM")),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
+    ])
+    .await;
+
+    let applied = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            digital: Some(DigitalChannel::D0),
+            slope: Some(Slope::Falling),
+            level_volts: Some(1.65),
+            ..EdgeTriggerConfig::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(applied.state.source, "D0");
+    assert!(applied.instrument_errors.is_empty());
+    fake.finish();
+}
+
+#[tokio::test]
+async fn two_trigger_sources_are_refused_before_sending() {
+    let (fake, scope) = connect(vec![]).await;
+    let result = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            channel: Some(1),
+            digital: Some(DigitalChannel::D3),
+            ..EdgeTriggerConfig::default()
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Conflicting(_))), "{result:?}");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_dho800_refuses_a_digital_trigger_before_sending() {
+    let fake = Fake::start(vec![step(
+        "*IDN?",
+        Reply::line("RIGOL TECHNOLOGIES,DHO804,DHO8A000000001,00.01.05"),
+    )])
+    .await;
+    let scope = Dho900::connect(
+        &fake.addr.ip().to_string(),
+        Some(fake.addr.port()),
+        SessionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            digital: Some(DigitalChannel::D0),
+            ..EdgeTriggerConfig::default()
+        })
+        .await;
+    assert!(
+        matches!(result, Err(Error::NotOnThisModel { .. })),
+        "{result:?}"
+    );
+    fake.finish();
+}
+
+#[test]
+fn digital_channels_map_to_guide_names_and_pods() {
+    assert_eq!(DigitalChannel::ALL.len(), 16);
+    for (n, d) in DigitalChannel::ALL.iter().enumerate() {
+        assert_eq!(usize::from(d.number()), n);
+        assert_eq!(serde_json::to_value(d).unwrap(), format!("D{n}"));
+    }
+    assert_eq!(DigitalChannel::D7.pod(), 1);
+    assert_eq!(DigitalChannel::D8.pod(), 2);
+}
+
+// ── Logic analyser ───────────────────────────────────────────────────────────
+
+/// The logic-analyser readback, as a DHO924S (00.01.05) answers it: D0–D7
+/// shown, thresholds in volts times 1e18.
+fn la_readback(shown: &[u8], pod1: &str, pod2: &str) -> Vec<Step> {
+    let mut v: Vec<Step> = (0..16u8)
+        .map(|n| {
+            step(
+                &format!(":LA:DIGital:ENABle? D{n}"),
+                Reply::line(if shown.contains(&n) { "1" } else { "0" }),
+            )
+        })
+        .collect();
+    v.push(step(":LA:ENABle?", Reply::line("1")));
+    v.push(step(":LA:POD1:THReshold?", Reply::line(pod1)));
+    v.push(step(":LA:POD2:THReshold?", Reply::line(pod2)));
+    v
+}
+
+#[tokio::test]
+async fn reads_the_logic_analyser_with_thresholds_in_volts() {
+    let (fake, scope) = connect(la_readback(
+        &[0, 1, 2, 3, 4, 5, 6, 7, 12],
+        "1.650000E+18",
+        "0.000000",
+    ))
+    .await;
+
+    let la = scope.logic_analyzer().await.unwrap();
+
+    assert!(la.enabled);
+    assert!((la.pod1_threshold_volts - 1.65).abs() < 1e-12);
+    assert_eq!(la.pod2_threshold_volts, 0.0);
+    let shown: Vec<_> = la
+        .channels
+        .iter()
+        .filter(|c| c.displayed)
+        .map(|c| c.channel)
+        .collect();
+    assert_eq!(shown.len(), 9);
+    assert_eq!(shown.last(), Some(&DigitalChannel::D12));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn configures_the_logic_analyser_on_first_in_guide_spelling() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":LA:ENABle 1", Reply::None),
+        step(":LA:POD1:THReshold 1.65", Reply::None),
+        step(":LA:POD2:THReshold 2.5", Reply::None),
+        step(":LA:DIGital:ENABle D8,1", Reply::None),
+        step(":LA:DIGital:ENABle D3,0", Reply::None),
+    ];
+    script.extend(la_readback(
+        &[0, 1, 2, 4, 5, 6, 7, 8],
+        "1.650000E+18",
+        "2.500000E+18",
+    ));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            enabled: Some(true),
+            show: vec![DigitalChannel::D8],
+            hide: vec![DigitalChannel::D3],
+            pod1_threshold_volts: Some(1.65),
+            pod2_threshold_volts: Some(2.5),
+        })
+        .await
+        .unwrap();
+
+    assert!((applied.state.pod2_threshold_volts - 2.5).abs() < 1e-12);
+    assert!(applied.state.channels[8].displayed);
+    assert!(!applied.state.channels[3].displayed);
+    assert!(applied.instrument_errors.is_empty());
+    fake.finish();
+}
+
+#[tokio::test]
+async fn turning_the_logic_analyser_off_comes_last() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":LA:DIGital:ENABle D12,0", Reply::None),
+        step(":LA:ENABle 0", Reply::None),
+    ];
+    // Off, every channel reads as hidden.
+    script.extend((0..16u8).map(|n| step(&format!(":LA:DIGital:ENABle? D{n}"), Reply::line("0"))));
+    script.push(step(":LA:ENABle?", Reply::line("0")));
+    script.push(step(":LA:POD1:THReshold?", Reply::line("1.650000E+18")));
+    script.push(step(":LA:POD2:THReshold?", Reply::line("1.650000E+18")));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            enabled: Some(false),
+            hide: vec![DigitalChannel::D12],
+            ..LogicAnalyzerConfig::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(!applied.state.enabled);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_threshold_the_scope_would_clamp_is_refused_before_sending() {
+    let (fake, scope) = connect(vec![]).await;
+    for v in [15.5, -20.0, f64::NAN] {
+        let result = scope
+            .configure_logic_analyzer(&LogicAnalyzerConfig {
+                pod2_threshold_volts: Some(v),
+                ..LogicAnalyzerConfig::default()
+            })
+            .await;
+        assert!(
+            matches!(result, Err(Error::OutOfRange { .. })),
+            "{v}: {result:?}"
+        );
+    }
+    fake.finish();
+}
+
+#[tokio::test]
+async fn showing_and_hiding_one_channel_is_refused() {
+    let (fake, scope) = connect(vec![]).await;
+    let result = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            show: vec![DigitalChannel::D1],
+            hide: vec![DigitalChannel::D1],
+            ..LogicAnalyzerConfig::default()
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Conflicting(_))), "{result:?}");
     fake.finish();
 }
 
@@ -357,6 +587,113 @@ async fn acquisition_control_uses_guide_spellings() {
     // A query, so the fake has seen every command before finish().
     scope.session().query("*IDN?").await.unwrap();
 
+    fake.finish();
+}
+
+#[tokio::test]
+async fn reads_measurement_statistics_in_guide_spelling() {
+    // Captured from a DHO924S (00.01.05), VPP on channel 1 right after the
+    // item was added: one reading, so no spread yet.
+    let (fake, scope) = connect(vec![
+        step(
+            ":MEASure:STATistic:ITEM? CURRent,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? MINimum,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? MAXimum,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? AVERages,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? DEViation,VPP,CHANnel1",
+            Reply::line("0.0000E+00"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? CNT,VPP,CHANnel1",
+            Reply::line("1.0000E+00"),
+        ),
+    ])
+    .await;
+
+    let s = scope.measure_statistics(MeasureItem::Vpp, 1).await.unwrap();
+
+    assert_eq!(s.current, Some(0.566));
+    assert_eq!(s.minimum, Some(0.566));
+    assert_eq!(s.maximum, Some(0.566));
+    assert_eq!(s.average, Some(0.566));
+    assert_eq!(s.deviation, Some(0.0));
+    assert_eq!(s.count, 1);
+    assert_eq!(s.unit, "V");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn unmeasurable_statistics_are_none() {
+    // 9.9E37 is the scope's "no reading", as for :MEASure:ITEM?.
+    let none = "9.9000E+37";
+    let (fake, scope) = connect(
+        [
+            "CURRent",
+            "MINimum",
+            "MAXimum",
+            "AVERages",
+            "DEViation",
+            "CNT",
+        ]
+        .iter()
+        .map(|t| {
+            step(
+                &format!(":MEASure:STATistic:ITEM? {t},FREQuency,CHANnel2"),
+                Reply::line(none),
+            )
+        })
+        .collect(),
+    )
+    .await;
+
+    let s = scope
+        .measure_statistics(MeasureItem::Frequency, 2)
+        .await
+        .unwrap();
+
+    assert_eq!((s.current, s.minimum, s.maximum), (None, None, None));
+    assert_eq!((s.average, s.deviation, s.count), (None, None, 0));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn statistics_on_a_missing_channel_send_nothing() {
+    let (fake, scope) = connect(vec![]).await;
+    assert!(matches!(
+        scope.measure_statistics(MeasureItem::Period, 5).await,
+        Err(Error::NoSuchInput { channel: 5, .. })
+    ));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn resetting_statistics_reports_the_error_queue() {
+    let (fake, scope) = connect(vec![
+        step("*CLS", Reply::None),
+        step(":MEASure:STATistic:RESet", Reply::None),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
+    ])
+    .await;
+
+    assert!(
+        scope
+            .reset_measurement_statistics()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     fake.finish();
 }
 

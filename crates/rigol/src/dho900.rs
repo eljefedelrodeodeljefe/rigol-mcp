@@ -25,6 +25,11 @@ use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 /// this threshold is "no reading".
 const INVALID_MEASUREMENT: f64 = 9.0e37;
 
+/// Furthest a logic-analyser pod threshold may be from 0 V. The Programming
+/// Guide gives ±20 V, but a DHO924S (00.01.05) silently clamps anything
+/// beyond ±15 V; refusing is better than a setting that quietly differs.
+pub const LA_THRESHOLD_LIMIT_VOLTS: f64 = 15.0;
+
 /// Bounds one waveform block read. Screen data (1000 points) takes tens of
 /// milliseconds; the margin is for a loaded network.
 const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -168,6 +173,99 @@ impl Slope {
     }
 }
 
+/// A digital channel of the logic analyser, D0 to D15 in Programming Guide
+/// terms. DHO900 series only; POD1 carries D0–D7 and POD2 D8–D15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "UPPERCASE")]
+pub enum DigitalChannel {
+    D0,
+    D1,
+    D2,
+    D3,
+    D4,
+    D5,
+    D6,
+    D7,
+    D8,
+    D9,
+    D10,
+    D11,
+    D12,
+    D13,
+    D14,
+    D15,
+}
+
+impl DigitalChannel {
+    /// Every digital channel, D0 first.
+    pub const ALL: [Self; 16] = [
+        Self::D0,
+        Self::D1,
+        Self::D2,
+        Self::D3,
+        Self::D4,
+        Self::D5,
+        Self::D6,
+        Self::D7,
+        Self::D8,
+        Self::D9,
+        Self::D10,
+        Self::D11,
+        Self::D12,
+        Self::D13,
+        Self::D14,
+        Self::D15,
+    ];
+
+    /// The channel number, 0 to 15.
+    pub fn number(self) -> u8 {
+        self as u8
+    }
+
+    /// The pod that carries this channel: 1 for D0–D7, 2 for D8–D15.
+    pub fn pod(self) -> u8 {
+        if self.number() < 8 { 1 } else { 2 }
+    }
+
+    fn scpi(self) -> String {
+        format!("D{}", self.number())
+    }
+}
+
+/// One digital channel's display state (`:LA:DIGital:ENABle? D<n>`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DigitalChannelState {
+    pub channel: DigitalChannel,
+    pub displayed: bool,
+}
+
+/// The logic analyser as the scope reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogicAnalyzer {
+    /// `:LA:ENABle?`
+    pub enabled: bool,
+    /// Logic threshold for D0–D7 in volts (`:LA:POD1:THReshold?`).
+    pub pod1_threshold_volts: f64,
+    /// Logic threshold for D8–D15 in volts (`:LA:POD2:THReshold?`).
+    pub pod2_threshold_volts: f64,
+    /// D0 to D15, in order.
+    pub channels: Vec<DigitalChannelState>,
+}
+
+/// Changes to the logic analyser. `None` and empty lists leave a setting
+/// alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LogicAnalyzerConfig {
+    pub enabled: Option<bool>,
+    /// Digital channels to turn on.
+    pub show: Vec<DigitalChannel>,
+    /// Digital channels to turn off.
+    pub hide: Vec<DigitalChannel>,
+    pub pod1_threshold_volts: Option<f64>,
+    pub pod2_threshold_volts: Option<f64>,
+}
+
 /// When the scope acquires (`:TRIGger:SWEep`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -208,10 +306,14 @@ pub struct ChannelConfig {
 }
 
 /// Changes to the edge trigger. `None` leaves a setting alone.
+///
+/// The source is `channel` or `digital`, never both.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EdgeTriggerConfig {
     /// Analog channel the trigger watches.
     pub channel: Option<u8>,
+    /// Digital channel the trigger watches (DHO900 series only).
+    pub digital: Option<DigitalChannel>,
     pub slope: Option<Slope>,
     pub level_volts: Option<f64>,
     pub sweep: Option<Sweep>,
@@ -367,6 +469,30 @@ impl Preamble {
     pub fn seconds(&self, i: usize) -> f64 {
         self.x_origin + (i as f64 - self.x_reference) * self.x_increment
     }
+}
+
+/// Statistics the scope keeps for one measurement item since it was added or
+/// last reset (`:MEASure:STATistic:ITEM? <type>,<item>,<source>`).
+///
+/// A value is `None` where the scope has no reading for it, as for
+/// [`Reading::value`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MeasureStatistics {
+    pub item: MeasureItem,
+    pub channel: u8,
+    pub unit: &'static str,
+    /// The latest reading (CURRent).
+    pub current: Option<f64>,
+    /// Smallest reading so far (MINimum).
+    pub minimum: Option<f64>,
+    /// Largest reading so far (MAXimum).
+    pub maximum: Option<f64>,
+    /// Mean of the readings so far (AVERages).
+    pub average: Option<f64>,
+    /// Standard deviation of the readings so far (DEViation).
+    pub deviation: Option<f64>,
+    /// How many readings the statistics cover (CNT).
+    pub count: u64,
 }
 
 /// A captured trace in volts against seconds.
@@ -607,6 +733,48 @@ impl Dho900 {
         })
     }
 
+    /// The statistics the scope holds for one measurement item.
+    ///
+    /// Like [`Dho900::measure`], not a pure read: an item that is not yet in
+    /// the on-screen list is added to it, and its statistics start from that
+    /// reading. Verified on a DHO924S (00.01.05): the first query of a new
+    /// item reports a count of 1.
+    pub async fn measure_statistics(
+        &self,
+        item: MeasureItem,
+        channel: u8,
+    ) -> Result<MeasureStatistics> {
+        self.check_channel(channel)?;
+        let stat = |kind: &'static str| {
+            let cmd = format!(
+                ":MEASure:STATistic:ITEM? {kind},{},CHANnel{channel}",
+                item.scpi()
+            );
+            async move {
+                let value = parse_number(&cmd, &self.session.query(&cmd).await?)?;
+                Ok::<_, Error>((value.abs() < INVALID_MEASUREMENT).then_some(value))
+            }
+        };
+        let current = stat("CURRent").await?;
+        let minimum = stat("MINimum").await?;
+        let maximum = stat("MAXimum").await?;
+        let average = stat("AVERages").await?;
+        let deviation = stat("DEViation").await?;
+        // The count comes back in scientific notation too: 5.4800E+02.
+        let count = stat("CNT").await?.map_or(0, |n| n.max(0.0).round() as u64);
+        Ok(MeasureStatistics {
+            item,
+            channel,
+            unit: item.unit(),
+            current,
+            minimum,
+            maximum,
+            average,
+            deviation,
+            count,
+        })
+    }
+
     /// The screen as a PNG (`:DISPlay:DATA? PNG`).
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
         self.session.query_block(":DISPlay:DATA? PNG").await
@@ -669,6 +837,15 @@ impl Dho900 {
     /// (`:MEASure:CLEar`), including ones added by [`Dho900::measure`].
     pub async fn clear_measurements(&self) -> Result<()> {
         self.session.command(":MEASure:CLEar").await
+    }
+
+    /// Clears the statistics history of every measurement item and starts
+    /// counting again (`:MEASure:STATistic:RESet`). The items stay in the
+    /// on-screen list. Returns anything the scope objected to.
+    pub async fn reset_measurement_statistics(&self) -> Result<Vec<InstrumentError>> {
+        self.session.clear_status().await?;
+        self.session.command(":MEASure:STATistic:RESet").await?;
+        self.errors().await
     }
 
     pub async fn configure_channel(
@@ -771,16 +948,29 @@ impl Dho900 {
         &self,
         cfg: &EdgeTriggerConfig,
     ) -> Result<Applied<EdgeTrigger>> {
-        if let Some(ch) = cfg.channel {
-            self.check_channel(ch)?;
-        }
+        let source = match (cfg.channel, cfg.digital) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Conflicting(
+                    "give an analog channel or a digital channel as the trigger source, not both",
+                ));
+            }
+            (Some(ch), None) => {
+                self.check_channel(ch)?;
+                Some(format!("CHANnel{ch}"))
+            }
+            (None, Some(d)) => {
+                self.check_digital()?;
+                Some(d.scpi())
+            }
+            (None, None) => None,
+        };
         check_finite("trigger level (V)", cfg.level_volts)?;
 
         self.session.clear_status().await?;
         self.session.command(":TRIGger:MODE EDGE").await?;
-        if let Some(ch) = cfg.channel {
+        if let Some(src) = source {
             self.session
-                .command(&format!(":TRIGger:EDGE:SOURce CHANnel{ch}"))
+                .command(&format!(":TRIGger:EDGE:SOURce {src}"))
                 .await?;
         }
         if let Some(s) = cfg.slope {
@@ -808,6 +998,89 @@ impl Dho900 {
             },
             instrument_errors: self.errors().await?,
         })
+    }
+
+    // ── Logic analyser (DHO900 series only) ──────────────────────────────────
+
+    pub async fn logic_analyzer(&self) -> Result<LogicAnalyzer> {
+        self.check_digital()?;
+        let mut channels = Vec::with_capacity(DigitalChannel::ALL.len());
+        for channel in DigitalChannel::ALL {
+            channels.push(DigitalChannelState {
+                channel,
+                displayed: self
+                    .flag(&format!(":LA:DIGital:ENABle? {}", channel.scpi()))
+                    .await?,
+            });
+        }
+        Ok(LogicAnalyzer {
+            enabled: self.flag(":LA:ENABle?").await?,
+            pod1_threshold_volts: self.la_threshold(1).await?,
+            pod2_threshold_volts: self.la_threshold(2).await?,
+            channels,
+        })
+    }
+
+    /// Turns the logic analyser on or off, shows or hides digital channels
+    /// and sets the pod thresholds. Turning it on comes first and turning it
+    /// off last, so the channel changes land on an analyser that is on.
+    pub async fn configure_logic_analyzer(
+        &self,
+        cfg: &LogicAnalyzerConfig,
+    ) -> Result<Applied<LogicAnalyzer>> {
+        self.check_digital()?;
+        if cfg.show.iter().any(|d| cfg.hide.contains(d)) {
+            return Err(Error::Conflicting(
+                "a digital channel cannot be both shown and hidden",
+            ));
+        }
+        for v in [cfg.pod1_threshold_volts, cfg.pod2_threshold_volts]
+            .into_iter()
+            .flatten()
+        {
+            if !(v.is_finite() && v.abs() <= LA_THRESHOLD_LIMIT_VOLTS) {
+                return Err(Error::OutOfRange {
+                    what: "logic threshold (V)",
+                    value: v,
+                    allowed: format!("-{LA_THRESHOLD_LIMIT_VOLTS} to {LA_THRESHOLD_LIMIT_VOLTS}"),
+                });
+            }
+        }
+
+        self.session.clear_status().await?;
+        if cfg.enabled == Some(true) {
+            self.session.command(":LA:ENABle 1").await?;
+        }
+        for (pod, v) in [(1, cfg.pod1_threshold_volts), (2, cfg.pod2_threshold_volts)] {
+            if let Some(v) = v {
+                self.session
+                    .command(&format!(":LA:POD{pod}:THReshold {v}"))
+                    .await?;
+            }
+        }
+        for (list, on) in [(&cfg.show, 1), (&cfg.hide, 0)] {
+            for d in list {
+                self.session
+                    .command(&format!(":LA:DIGital:ENABle {},{on}", d.scpi()))
+                    .await?;
+            }
+        }
+        if cfg.enabled == Some(false) {
+            self.session.command(":LA:ENABle 0").await?;
+        }
+        Ok(Applied {
+            state: self.logic_analyzer().await?,
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    /// One pod's threshold in volts. This firmware answers in volts times
+    /// 1e18: 1.65 V reads back as `1.650000E+18`. No real threshold is
+    /// anywhere near 1e3 V, so a reply that large is scaled back down; one
+    /// in volts, as the guide documents, passes through.
+    async fn la_threshold(&self, pod: u8) -> Result<f64> {
+        let v = self.number(&format!(":LA:POD{pod}:THReshold?")).await?;
+        Ok(if v.abs() > 1e3 { v / 1e18 } else { v })
     }
 
     // ── Signal generator ─────────────────────────────────────────────────────
@@ -910,6 +1183,19 @@ impl Dho900 {
             200e-6
         } else {
             500e-6
+        }
+    }
+
+    /// Digital channels and the logic analyser exist on the DHO900 series
+    /// only (Programming Guide, `:LA` commands).
+    fn check_digital(&self) -> Result<()> {
+        if self.identity.model.to_ascii_uppercase().starts_with("DHO9") {
+            Ok(())
+        } else {
+            Err(Error::NotOnThisModel {
+                what: "digital channels (D0-D15)",
+                model: self.identity.model.clone(),
+            })
         }
     }
 
