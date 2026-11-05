@@ -570,6 +570,32 @@ impl RigolServer {
         Ok(Self::ok(&data))
     }
 
+    // ── Logic analyser (DHO900 series only) ───────────────────────────────────
+
+    #[tool(
+        description = "Get the logic analyser's state: on or off, the POD1 (D0–D7) and POD2 (D8–D15) logic thresholds in volts, and which of D0–D15 are shown (:LA:ENABle? :LA:POD<n>:THReshold? :LA:DIGital:ENABle? D<n>). DHO900 series only"
+    )]
+    async fn get_logic_analyzer(&self) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::logic_analyzer(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Turn the logic analyser on or off, show or hide digital channels D0–D15, and set the pod logic thresholds (:LA:ENABle, :LA:DIGital:ENABle D<n>,<bool>, :LA:POD<n>:THReshold). Omitted fields are left alone. Turning the analyser on shows D0–D7 again, so list any other channels in show in the same call. Returns what the scope holds afterwards plus any errors it raised. DHO900 series only. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn configure_logic_analyzer(
+        &self,
+        Parameters(p): Parameters<ConfigureLogicAnalyzerParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_logic_analyzer(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
     // ── Signal generator ──────────────────────────────────────────────────────
     //
     // Unlike the rest of the scope, this drives a signal into the device under
@@ -718,6 +744,7 @@ mod tests {
                 "configure_channel",
                 "configure_edge_trigger",
                 "configure_generator",
+                "configure_logic_analyzer",
                 "configure_timebase",
                 "generator_output_off",
                 "generator_output_on",
@@ -725,6 +752,7 @@ mod tests {
                 "get_identity",
                 "get_instrument_errors",
                 "get_lan_config",
+                "get_logic_analyzer",
                 "get_screenshot",
                 "get_status",
                 "get_waveform",

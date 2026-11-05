@@ -3,7 +3,8 @@
 
 use rigol::{
     ChannelConfig, Coupling, Dho900, DigitalChannel, EdgeTriggerConfig, Error, Family,
-    GeneratorConfig, GeneratorLimits, MeasureItem, SessionConfig, Slope, Sweep, Waveshape,
+    GeneratorConfig, GeneratorLimits, LogicAnalyzerConfig, MeasureItem, SessionConfig, Slope,
+    Sweep, Waveshape,
 };
 use rigol_fake::{Fake, Reply, Step, step};
 
@@ -424,6 +425,146 @@ fn digital_channels_map_to_guide_names_and_pods() {
     }
     assert_eq!(DigitalChannel::D7.pod(), 1);
     assert_eq!(DigitalChannel::D8.pod(), 2);
+}
+
+// ── Logic analyser ───────────────────────────────────────────────────────────
+
+/// The logic-analyser readback, as a DHO924S (00.01.05) answers it: D0–D7
+/// shown, thresholds in volts times 1e18.
+fn la_readback(shown: &[u8], pod1: &str, pod2: &str) -> Vec<Step> {
+    let mut v: Vec<Step> = (0..16u8)
+        .map(|n| {
+            step(
+                &format!(":LA:DIGital:ENABle? D{n}"),
+                Reply::line(if shown.contains(&n) { "1" } else { "0" }),
+            )
+        })
+        .collect();
+    v.push(step(":LA:ENABle?", Reply::line("1")));
+    v.push(step(":LA:POD1:THReshold?", Reply::line(pod1)));
+    v.push(step(":LA:POD2:THReshold?", Reply::line(pod2)));
+    v
+}
+
+#[tokio::test]
+async fn reads_the_logic_analyser_with_thresholds_in_volts() {
+    let (fake, scope) = connect(la_readback(
+        &[0, 1, 2, 3, 4, 5, 6, 7, 12],
+        "1.650000E+18",
+        "0.000000",
+    ))
+    .await;
+
+    let la = scope.logic_analyzer().await.unwrap();
+
+    assert!(la.enabled);
+    assert!((la.pod1_threshold_volts - 1.65).abs() < 1e-12);
+    assert_eq!(la.pod2_threshold_volts, 0.0);
+    let shown: Vec<_> = la
+        .channels
+        .iter()
+        .filter(|c| c.displayed)
+        .map(|c| c.channel)
+        .collect();
+    assert_eq!(shown.len(), 9);
+    assert_eq!(shown.last(), Some(&DigitalChannel::D12));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn configures_the_logic_analyser_on_first_in_guide_spelling() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":LA:ENABle 1", Reply::None),
+        step(":LA:POD1:THReshold 1.65", Reply::None),
+        step(":LA:POD2:THReshold 2.5", Reply::None),
+        step(":LA:DIGital:ENABle D8,1", Reply::None),
+        step(":LA:DIGital:ENABle D3,0", Reply::None),
+    ];
+    script.extend(la_readback(
+        &[0, 1, 2, 4, 5, 6, 7, 8],
+        "1.650000E+18",
+        "2.500000E+18",
+    ));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            enabled: Some(true),
+            show: vec![DigitalChannel::D8],
+            hide: vec![DigitalChannel::D3],
+            pod1_threshold_volts: Some(1.65),
+            pod2_threshold_volts: Some(2.5),
+        })
+        .await
+        .unwrap();
+
+    assert!((applied.state.pod2_threshold_volts - 2.5).abs() < 1e-12);
+    assert!(applied.state.channels[8].displayed);
+    assert!(!applied.state.channels[3].displayed);
+    assert!(applied.instrument_errors.is_empty());
+    fake.finish();
+}
+
+#[tokio::test]
+async fn turning_the_logic_analyser_off_comes_last() {
+    let mut script = vec![
+        step("*CLS", Reply::None),
+        step(":LA:DIGital:ENABle D12,0", Reply::None),
+        step(":LA:ENABle 0", Reply::None),
+    ];
+    // Off, every channel reads as hidden.
+    script.extend((0..16u8).map(|n| step(&format!(":LA:DIGital:ENABle? D{n}"), Reply::line("0"))));
+    script.push(step(":LA:ENABle?", Reply::line("0")));
+    script.push(step(":LA:POD1:THReshold?", Reply::line("1.650000E+18")));
+    script.push(step(":LA:POD2:THReshold?", Reply::line("1.650000E+18")));
+    script.push(step(":SYST:ERR?", Reply::line(r#"0,"No error""#)));
+    let (fake, scope) = connect(script).await;
+
+    let applied = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            enabled: Some(false),
+            hide: vec![DigitalChannel::D12],
+            ..LogicAnalyzerConfig::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(!applied.state.enabled);
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_threshold_the_scope_would_clamp_is_refused_before_sending() {
+    let (fake, scope) = connect(vec![]).await;
+    for v in [15.5, -20.0, f64::NAN] {
+        let result = scope
+            .configure_logic_analyzer(&LogicAnalyzerConfig {
+                pod2_threshold_volts: Some(v),
+                ..LogicAnalyzerConfig::default()
+            })
+            .await;
+        assert!(
+            matches!(result, Err(Error::OutOfRange { .. })),
+            "{v}: {result:?}"
+        );
+    }
+    fake.finish();
+}
+
+#[tokio::test]
+async fn showing_and_hiding_one_channel_is_refused() {
+    let (fake, scope) = connect(vec![]).await;
+    let result = scope
+        .configure_logic_analyzer(&LogicAnalyzerConfig {
+            show: vec![DigitalChannel::D1],
+            hide: vec![DigitalChannel::D1],
+            ..LogicAnalyzerConfig::default()
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Conflicting(_))), "{result:?}");
+    fake.finish();
 }
 
 #[tokio::test]

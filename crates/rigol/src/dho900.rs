@@ -25,6 +25,11 @@ use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 /// this threshold is "no reading".
 const INVALID_MEASUREMENT: f64 = 9.0e37;
 
+/// Furthest a logic-analyser pod threshold may be from 0 V. The Programming
+/// Guide gives ±20 V, but a DHO924S (00.01.05) silently clamps anything
+/// beyond ±15 V; refusing is better than a setting that quietly differs.
+pub const LA_THRESHOLD_LIMIT_VOLTS: f64 = 15.0;
+
 /// Bounds one waveform block read. Screen data (1000 points) takes tens of
 /// milliseconds; the margin is for a loaded network.
 const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -226,6 +231,39 @@ impl DigitalChannel {
     fn scpi(self) -> String {
         format!("D{}", self.number())
     }
+}
+
+/// One digital channel's display state (`:LA:DIGital:ENABle? D<n>`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DigitalChannelState {
+    pub channel: DigitalChannel,
+    pub displayed: bool,
+}
+
+/// The logic analyser as the scope reports it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogicAnalyzer {
+    /// `:LA:ENABle?`
+    pub enabled: bool,
+    /// Logic threshold for D0–D7 in volts (`:LA:POD1:THReshold?`).
+    pub pod1_threshold_volts: f64,
+    /// Logic threshold for D8–D15 in volts (`:LA:POD2:THReshold?`).
+    pub pod2_threshold_volts: f64,
+    /// D0 to D15, in order.
+    pub channels: Vec<DigitalChannelState>,
+}
+
+/// Changes to the logic analyser. `None` and empty lists leave a setting
+/// alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LogicAnalyzerConfig {
+    pub enabled: Option<bool>,
+    /// Digital channels to turn on.
+    pub show: Vec<DigitalChannel>,
+    /// Digital channels to turn off.
+    pub hide: Vec<DigitalChannel>,
+    pub pod1_threshold_volts: Option<f64>,
+    pub pod2_threshold_volts: Option<f64>,
 }
 
 /// When the scope acquires (`:TRIGger:SWEep`).
@@ -960,6 +998,89 @@ impl Dho900 {
             },
             instrument_errors: self.errors().await?,
         })
+    }
+
+    // ── Logic analyser (DHO900 series only) ──────────────────────────────────
+
+    pub async fn logic_analyzer(&self) -> Result<LogicAnalyzer> {
+        self.check_digital()?;
+        let mut channels = Vec::with_capacity(DigitalChannel::ALL.len());
+        for channel in DigitalChannel::ALL {
+            channels.push(DigitalChannelState {
+                channel,
+                displayed: self
+                    .flag(&format!(":LA:DIGital:ENABle? {}", channel.scpi()))
+                    .await?,
+            });
+        }
+        Ok(LogicAnalyzer {
+            enabled: self.flag(":LA:ENABle?").await?,
+            pod1_threshold_volts: self.la_threshold(1).await?,
+            pod2_threshold_volts: self.la_threshold(2).await?,
+            channels,
+        })
+    }
+
+    /// Turns the logic analyser on or off, shows or hides digital channels
+    /// and sets the pod thresholds. Turning it on comes first and turning it
+    /// off last, so the channel changes land on an analyser that is on.
+    pub async fn configure_logic_analyzer(
+        &self,
+        cfg: &LogicAnalyzerConfig,
+    ) -> Result<Applied<LogicAnalyzer>> {
+        self.check_digital()?;
+        if cfg.show.iter().any(|d| cfg.hide.contains(d)) {
+            return Err(Error::Conflicting(
+                "a digital channel cannot be both shown and hidden",
+            ));
+        }
+        for v in [cfg.pod1_threshold_volts, cfg.pod2_threshold_volts]
+            .into_iter()
+            .flatten()
+        {
+            if !(v.is_finite() && v.abs() <= LA_THRESHOLD_LIMIT_VOLTS) {
+                return Err(Error::OutOfRange {
+                    what: "logic threshold (V)",
+                    value: v,
+                    allowed: format!("-{LA_THRESHOLD_LIMIT_VOLTS} to {LA_THRESHOLD_LIMIT_VOLTS}"),
+                });
+            }
+        }
+
+        self.session.clear_status().await?;
+        if cfg.enabled == Some(true) {
+            self.session.command(":LA:ENABle 1").await?;
+        }
+        for (pod, v) in [(1, cfg.pod1_threshold_volts), (2, cfg.pod2_threshold_volts)] {
+            if let Some(v) = v {
+                self.session
+                    .command(&format!(":LA:POD{pod}:THReshold {v}"))
+                    .await?;
+            }
+        }
+        for (list, on) in [(&cfg.show, 1), (&cfg.hide, 0)] {
+            for d in list {
+                self.session
+                    .command(&format!(":LA:DIGital:ENABle {},{on}", d.scpi()))
+                    .await?;
+            }
+        }
+        if cfg.enabled == Some(false) {
+            self.session.command(":LA:ENABle 0").await?;
+        }
+        Ok(Applied {
+            state: self.logic_analyzer().await?,
+            instrument_errors: self.errors().await?,
+        })
+    }
+
+    /// One pod's threshold in volts. This firmware answers in volts times
+    /// 1e18: 1.65 V reads back as `1.650000E+18`. No real threshold is
+    /// anywhere near 1e3 V, so a reply that large is scaled back down; one
+    /// in volts, as the guide documents, passes through.
+    async fn la_threshold(&self, pod: u8) -> Result<f64> {
+        let v = self.number(&format!(":LA:POD{pod}:THReshold?")).await?;
+        Ok(if v.abs() > 1e3 { v / 1e18 } else { v })
     }
 
     // ── Signal generator ─────────────────────────────────────────────────────

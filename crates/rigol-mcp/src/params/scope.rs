@@ -96,3 +96,23 @@ pub struct ConfigureGeneratorParams {
     )]
     pub offset_volts: Option<f64>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureLogicAnalyzerParams {
+    #[schemars(
+        description = "Turn the logic analyser on or off (:LA:ENABle). Turning it on shows D0–D7 again, whatever was shown before"
+    )]
+    pub enabled: Option<bool>,
+    #[schemars(description = "Digital channels to show (:LA:DIGital:ENABle D<n>,1)")]
+    pub show: Option<Vec<DigitalChannel>>,
+    #[schemars(description = "Digital channels to hide (:LA:DIGital:ENABle D<n>,0)")]
+    pub hide: Option<Vec<DigitalChannel>>,
+    #[schemars(
+        description = "Logic threshold for D0–D7 in volts (:LA:POD1:THReshold), -15 to 15. 1.65 suits 3.3 V logic"
+    )]
+    pub pod1_threshold_volts: Option<f64>,
+    #[schemars(
+        description = "Logic threshold for D8–D15 in volts (:LA:POD2:THReshold), -15 to 15"
+    )]
+    pub pod2_threshold_volts: Option<f64>,
+}

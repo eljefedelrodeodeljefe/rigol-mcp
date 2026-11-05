@@ -146,10 +146,12 @@ trust the ceilings.
 | `get_waveform` | A trace in volts/seconds, thinned to min/max buckets, with full-capture stats | — |
 | `get_identity` / `get_lan_config` / `get_instrument_errors` | Identity (with channel count), LAN, error queue | — |
 | `get_generator` | Signal generator state and its ceilings | — |
+| `get_logic_analyzer` | Logic analyser on/off, pod thresholds, which of D0–D15 are shown (DHO900) | — |
 | `run` / `stop` / `single` / `autoset` | Acquisition control | writes |
 | `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns what the scope actually holds. The edge trigger takes an analog channel or a digital channel D0–D15 | writes |
 | `clear_measurements` | Empty the on-screen measurement list | writes |
 | `reset_measurement_statistics` | Restart every item's statistics (`:MEASure:STATistic:RESet`) | writes |
+| `configure_logic_analyzer` | Logic analyser on/off, show/hide D0–D15, pod thresholds (DHO900) | writes |
 | `configure_generator` | Waveform, frequency, amplitude, offset — output stays off | writes |
 | `generator_output_on` / `generator_output_off` | Drive or stop the signal | writes |
 
@@ -233,6 +235,16 @@ Measured against a DHO924S on `00.01.05`:
 - **The MAC's case depends on the interface** — upper-case over LAN, lower-case over USB.
   The library normalises it.
 - **The error queue uses `-100,"Command err"`** where a DP832A says `-113`.
+- **Logic-analyser pod thresholds read back in volts times 10¹⁸**: after
+  `:LA:POD1:THReshold 1.65`, `:LA:POD1:THReshold?` answers `1.650000E+18`. The library scales
+  it back to volts. Sending that reply back as a setting does not round-trip, it clamps.
+- **Thresholds clamp at ±15 V without an error**, not the guide's ±20 V: `20` reads back as
+  `1.500000E+19`. The library refuses anything beyond ±15 V rather than let it clamp.
+- **`:LA:ENABle 0` hides every digital channel, and `:LA:ENABle 1` shows D0–D7 again**,
+  whatever was shown before. `configure_logic_analyzer` turns the analyser on before applying
+  `show`, so one call can restore any set.
+- **Measurement statistics only grow while the scope triggers.** In `NORMal` sweep with
+  nothing triggering, `:MEASure:STATistic:ITEM? CNT,…` stays at 0 after a reset.
 - Latency is 23–55 ms per query on a direct link; a 1024×600 PNG screenshot takes ~300 ms.
 
 ## Contributing
