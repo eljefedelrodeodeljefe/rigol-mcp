@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.2.0...v0.3.0) (2026-11-05)
+
+
+### Features
+
+* digital channels D0-D15 as the edge trigger source ([9864526](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/9864526576ea1ab1a91bd95a3850b27595e76fb9))
+* logic analyser state, channel display and pod thresholds ([de2acca](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/de2acca39e5394d2a800888de4a6b599c1568bee))
+* measurement statistics and their reset for the scope ([9344586](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/934458635bd6b8485f18751ea6201b8aa5493230))
+* scope measurement statistics, digital edge trigger, logic analyser basics ([14b5fe2](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/14b5fe236080d790cb7be492366faa18144f4128))
+
+
+### Refactors
+
+* log through tracing in the probe, deny print macros ([212494e](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/212494e0db90312f49a99abe3cc7ff399f827063))
+* log through tracing in the probe, deny print macros ([9f3a78e](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/9f3a78e3660ddea0206f54e535cb3a70f33a58fc))
+
 ## [0.2.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.1.0...v0.2.0) (2026-10-06)
 
 
