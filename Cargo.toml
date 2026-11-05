@@ -3,13 +3,13 @@ resolver = "3"
 members = ["crates/rigol", "crates/rigol-mcp", "crates/rigol-fake"]
 
 [workspace.package]
-version = "0.2.0" # x-release-please-version
+version = "0.3.0" # x-release-please-version
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/eljefedelrodeodeljefe/rigol-mcp"
 
 [workspace.dependencies]
-rigol = { path = "crates/rigol", version = "0.2.0" } # x-release-please-version
+rigol = { path = "crates/rigol", version = "0.3.0" } # x-release-please-version
 rigol-fake = { path = "crates/rigol-fake" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
