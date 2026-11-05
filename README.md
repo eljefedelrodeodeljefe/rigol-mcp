@@ -177,8 +177,10 @@ enums.
 cargo run -p rigol --example probe -- 192.0.2.20
 ```
 
-The probe is read-only. It identifies the instrument; for a scope it prints a table of every
-query the firmware accepts.
+The probe is read-only by default. It identifies the instrument; for a scope it prints a table
+of every query the firmware accepts. `--write` adds a fixed list of display, trigger and
+logic-analyser set commands, each read, set, read back and error-checked, then puts every
+setting back. It never touches the signal generator.
 
 ## Firmware quirks worth knowing
 
