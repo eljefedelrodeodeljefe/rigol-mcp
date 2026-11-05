@@ -105,4 +105,5 @@ with Grype, both installed from pinned, checksum-verified release tarballs.
 ## Runtime
 
 stdout is the MCP protocol channel. All diagnostics go to stderr via `tracing`. Anything
-printed to stdout corrupts the JSON-RPC stream.
+printed to stdout corrupts the JSON-RPC stream. The workspace denies `print_stdout`,
+`print_stderr` and `dbg_macro`, so `println!` fails clippy everywhere, examples included.
