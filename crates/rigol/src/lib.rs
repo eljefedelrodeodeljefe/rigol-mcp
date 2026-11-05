@@ -22,8 +22,8 @@ pub mod scpi;
 
 pub use dho900::{
     Applied, Bucket, ChannelConfig, ChannelState, Coupling, Dho900, EdgeTrigger, EdgeTriggerConfig,
-    GeneratorState, MeasureItem, Preamble, Reading, ScopeLan, ScopeStatus, Slope, Sweep, Timebase,
-    Waveform, WaveformStats,
+    GeneratorState, MeasureItem, MeasureStatistics, Preamble, Reading, ScopeLan, ScopeStatus,
+    Slope, Sweep, Timebase, Waveform, WaveformStats,
 };
 pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
 pub use error::{Error, Result};

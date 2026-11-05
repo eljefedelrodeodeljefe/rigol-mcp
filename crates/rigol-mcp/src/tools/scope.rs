@@ -30,6 +30,12 @@ pub async fn measure(scope: &Dho900, p: &MeasureParams) -> Result<Value> {
     )?)
 }
 
+pub async fn measure_statistics(scope: &Dho900, p: &MeasureParams) -> Result<Value> {
+    Ok(serde_json::to_value(
+        scope.measure_statistics(p.item, p.channel).await?,
+    )?)
+}
+
 pub async fn screenshot(scope: &Dho900) -> Result<Vec<u8>> {
     Ok(scope.screenshot().await?)
 }
@@ -78,6 +84,11 @@ pub async fn autoset(scope: &Dho900) -> Result<Value> {
 pub async fn clear_measurements(scope: &Dho900) -> Result<Value> {
     scope.clear_measurements().await?;
     Ok(json!({ "sent": ":MEASure:CLEar" }))
+}
+
+pub async fn reset_measurement_statistics(scope: &Dho900) -> Result<Value> {
+    let errors = scope.reset_measurement_statistics().await?;
+    Ok(json!({ "sent": ":MEASure:STATistic:RESet", "instrument_errors": errors }))
 }
 
 pub async fn configure_channel(scope: &Dho900, p: &ConfigureChannelParams) -> Result<Value> {

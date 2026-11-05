@@ -142,12 +142,14 @@ trust the ceilings.
 | `get_screenshot` | The screen, as an image (`:DISPlay:DATA? PNG`) | — |
 | `get_status` | Trigger, timebase, acquisition, every channel | — |
 | `measure` | One automatic measurement (`:MEASure:ITEM?`); `null` when unmeasurable | — |
+| `measure_statistics` | Current/min/max/average/deviation/count for one measurement (`:MEASure:STATistic:ITEM?`) | — |
 | `get_waveform` | A trace in volts/seconds, thinned to min/max buckets, with full-capture stats | — |
 | `get_identity` / `get_lan_config` / `get_instrument_errors` | Identity (with channel count), LAN, error queue | — |
 | `get_generator` | Signal generator state and its ceilings | — |
 | `run` / `stop` / `single` / `autoset` | Acquisition control | writes |
 | `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns what the scope actually holds | writes |
 | `clear_measurements` | Empty the on-screen measurement list | writes |
+| `reset_measurement_statistics` | Restart every item's statistics (`:MEASure:STATistic:RESet`) | writes |
 | `configure_generator` | Waveform, frequency, amplitude, offset — output stays off | writes |
 | `generator_output_on` / `generator_output_off` | Drive or stop the signal | writes |
 

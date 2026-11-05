@@ -360,6 +360,113 @@ async fn acquisition_control_uses_guide_spellings() {
     fake.finish();
 }
 
+#[tokio::test]
+async fn reads_measurement_statistics_in_guide_spelling() {
+    // Captured from a DHO924S (00.01.05), VPP on channel 1 right after the
+    // item was added: one reading, so no spread yet.
+    let (fake, scope) = connect(vec![
+        step(
+            ":MEASure:STATistic:ITEM? CURRent,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? MINimum,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? MAXimum,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? AVERages,VPP,CHANnel1",
+            Reply::line("5.6600E-01"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? DEViation,VPP,CHANnel1",
+            Reply::line("0.0000E+00"),
+        ),
+        step(
+            ":MEASure:STATistic:ITEM? CNT,VPP,CHANnel1",
+            Reply::line("1.0000E+00"),
+        ),
+    ])
+    .await;
+
+    let s = scope.measure_statistics(MeasureItem::Vpp, 1).await.unwrap();
+
+    assert_eq!(s.current, Some(0.566));
+    assert_eq!(s.minimum, Some(0.566));
+    assert_eq!(s.maximum, Some(0.566));
+    assert_eq!(s.average, Some(0.566));
+    assert_eq!(s.deviation, Some(0.0));
+    assert_eq!(s.count, 1);
+    assert_eq!(s.unit, "V");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn unmeasurable_statistics_are_none() {
+    // 9.9E37 is the scope's "no reading", as for :MEASure:ITEM?.
+    let none = "9.9000E+37";
+    let (fake, scope) = connect(
+        [
+            "CURRent",
+            "MINimum",
+            "MAXimum",
+            "AVERages",
+            "DEViation",
+            "CNT",
+        ]
+        .iter()
+        .map(|t| {
+            step(
+                &format!(":MEASure:STATistic:ITEM? {t},FREQuency,CHANnel2"),
+                Reply::line(none),
+            )
+        })
+        .collect(),
+    )
+    .await;
+
+    let s = scope
+        .measure_statistics(MeasureItem::Frequency, 2)
+        .await
+        .unwrap();
+
+    assert_eq!((s.current, s.minimum, s.maximum), (None, None, None));
+    assert_eq!((s.average, s.deviation, s.count), (None, None, 0));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn statistics_on_a_missing_channel_send_nothing() {
+    let (fake, scope) = connect(vec![]).await;
+    assert!(matches!(
+        scope.measure_statistics(MeasureItem::Period, 5).await,
+        Err(Error::NoSuchInput { channel: 5, .. })
+    ));
+    fake.finish();
+}
+
+#[tokio::test]
+async fn resetting_statistics_reports_the_error_queue() {
+    let (fake, scope) = connect(vec![
+        step("*CLS", Reply::None),
+        step(":MEASure:STATistic:RESet", Reply::None),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
+    ])
+    .await;
+
+    assert!(
+        scope
+            .reset_measurement_statistics()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    fake.finish();
+}
+
 // ── Signal generator ─────────────────────────────────────────────────────────
 
 fn generator_now(shape: &str, hz: &str, amp: &str, off: &str) -> Vec<Step> {

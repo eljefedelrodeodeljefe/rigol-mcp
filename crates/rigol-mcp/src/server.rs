@@ -420,6 +420,19 @@ impl RigolServer {
     }
 
     #[tool(
+        description = "Get the statistics the scope keeps for one measurement on a channel: current, minimum, maximum, average, standard deviation and count of readings (:MEASure:STATistic:ITEM? CURRent|MINimum|MAXimum|AVERages|DEViation|CNT,<item>,CHANnel<n>). They cover every reading since the item was added or since reset_measurement_statistics. A value is null when the scope has no reading for it. Like measure, this adds the item to the on-screen measurement list if it is not there yet, and its statistics start from that reading"
+    )]
+    async fn measure_statistics(
+        &self,
+        Parameters(p): Parameters<MeasureParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::measure_statistics(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
         description = "Capture the oscilloscope screen as a PNG image (:DISPlay:DATA? PNG). The quickest way to see the instrument's whole state at once"
     )]
     async fn get_screenshot(&self) -> Result<CallToolResult, ErrorData> {
@@ -499,6 +512,17 @@ impl RigolServer {
     async fn clear_measurements(&self) -> Result<CallToolResult, ErrorData> {
         self.guard_write()?;
         let data = tools::scope::clear_measurements(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        description = "Clear the statistics history of every measurement item and start counting again (:MEASure:STATistic:RESet). The items stay in the on-screen list. Returns any errors the scope raised. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn reset_measurement_statistics(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::reset_measurement_statistics(self.scope().await?)
             .await
             .map_err(tool_error)?;
         Ok(Self::ok(&data))
@@ -705,6 +729,8 @@ mod tests {
                 "get_status",
                 "get_waveform",
                 "measure",
+                "measure_statistics",
+                "reset_measurement_statistics",
                 "run",
                 "single",
                 "stop",

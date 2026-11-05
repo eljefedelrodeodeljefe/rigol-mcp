@@ -369,6 +369,30 @@ impl Preamble {
     }
 }
 
+/// Statistics the scope keeps for one measurement item since it was added or
+/// last reset (`:MEASure:STATistic:ITEM? <type>,<item>,<source>`).
+///
+/// A value is `None` where the scope has no reading for it, as for
+/// [`Reading::value`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MeasureStatistics {
+    pub item: MeasureItem,
+    pub channel: u8,
+    pub unit: &'static str,
+    /// The latest reading (CURRent).
+    pub current: Option<f64>,
+    /// Smallest reading so far (MINimum).
+    pub minimum: Option<f64>,
+    /// Largest reading so far (MAXimum).
+    pub maximum: Option<f64>,
+    /// Mean of the readings so far (AVERages).
+    pub average: Option<f64>,
+    /// Standard deviation of the readings so far (DEViation).
+    pub deviation: Option<f64>,
+    /// How many readings the statistics cover (CNT).
+    pub count: u64,
+}
+
 /// A captured trace in volts against seconds.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Waveform {
@@ -607,6 +631,48 @@ impl Dho900 {
         })
     }
 
+    /// The statistics the scope holds for one measurement item.
+    ///
+    /// Like [`Dho900::measure`], not a pure read: an item that is not yet in
+    /// the on-screen list is added to it, and its statistics start from that
+    /// reading. Verified on a DHO924S (00.01.05): the first query of a new
+    /// item reports a count of 1.
+    pub async fn measure_statistics(
+        &self,
+        item: MeasureItem,
+        channel: u8,
+    ) -> Result<MeasureStatistics> {
+        self.check_channel(channel)?;
+        let stat = |kind: &'static str| {
+            let cmd = format!(
+                ":MEASure:STATistic:ITEM? {kind},{},CHANnel{channel}",
+                item.scpi()
+            );
+            async move {
+                let value = parse_number(&cmd, &self.session.query(&cmd).await?)?;
+                Ok::<_, Error>((value.abs() < INVALID_MEASUREMENT).then_some(value))
+            }
+        };
+        let current = stat("CURRent").await?;
+        let minimum = stat("MINimum").await?;
+        let maximum = stat("MAXimum").await?;
+        let average = stat("AVERages").await?;
+        let deviation = stat("DEViation").await?;
+        // The count comes back in scientific notation too: 5.4800E+02.
+        let count = stat("CNT").await?.map_or(0, |n| n.max(0.0).round() as u64);
+        Ok(MeasureStatistics {
+            item,
+            channel,
+            unit: item.unit(),
+            current,
+            minimum,
+            maximum,
+            average,
+            deviation,
+            count,
+        })
+    }
+
     /// The screen as a PNG (`:DISPlay:DATA? PNG`).
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
         self.session.query_block(":DISPlay:DATA? PNG").await
@@ -669,6 +735,15 @@ impl Dho900 {
     /// (`:MEASure:CLEar`), including ones added by [`Dho900::measure`].
     pub async fn clear_measurements(&self) -> Result<()> {
         self.session.command(":MEASure:CLEar").await
+    }
+
+    /// Clears the statistics history of every measurement item and starts
+    /// counting again (`:MEASure:STATistic:RESet`). The items stay in the
+    /// on-screen list. Returns anything the scope objected to.
+    pub async fn reset_measurement_statistics(&self) -> Result<Vec<InstrumentError>> {
+        self.session.clear_status().await?;
+        self.session.command(":MEASure:STATistic:RESet").await?;
+        self.errors().await
     }
 
     pub async fn configure_channel(
