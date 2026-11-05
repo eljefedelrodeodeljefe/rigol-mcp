@@ -147,7 +147,7 @@ trust the ceilings.
 | `get_identity` / `get_lan_config` / `get_instrument_errors` | Identity (with channel count), LAN, error queue | — |
 | `get_generator` | Signal generator state and its ceilings | — |
 | `run` / `stop` / `single` / `autoset` | Acquisition control | writes |
-| `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns what the scope actually holds | writes |
+| `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns what the scope actually holds. The edge trigger takes an analog channel or a digital channel D0–D15 | writes |
 | `clear_measurements` | Empty the on-screen measurement list | writes |
 | `reset_measurement_statistics` | Restart every item's statistics (`:MEASure:STATistic:RESet`) | writes |
 | `configure_generator` | Waveform, frequency, amplitude, offset — output stays off | writes |

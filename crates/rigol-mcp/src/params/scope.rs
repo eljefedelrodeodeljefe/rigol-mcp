@@ -1,4 +1,4 @@
-use rigol::{Coupling, MeasureItem, Slope, Sweep, Waveshape};
+use rigol::{Coupling, DigitalChannel, MeasureItem, Slope, Sweep, Waveshape};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -59,8 +59,14 @@ pub struct ConfigureTimebaseParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ConfigureEdgeTriggerParams {
-    #[schemars(description = "Analog channel to trigger on (:TRIGger:EDGE:SOURce CHANnel<n>)")]
+    #[schemars(
+        description = "Analog channel to trigger on (:TRIGger:EDGE:SOURce CHANnel<n>). Give this or digital, not both"
+    )]
     pub channel: Option<u8>,
+    #[schemars(
+        description = "Digital channel D0–D15 to trigger on (:TRIGger:EDGE:SOURce D<n>), DHO900 series only. The trigger level then sets the switching threshold for that edge, -20 V to 20 V. Give this or channel, not both"
+    )]
+    pub digital: Option<DigitalChannel>,
     #[schemars(description = "Edge to trigger on (:TRIGger:EDGE:SLOPe)")]
     pub slope: Option<Slope>,
     #[schemars(description = "Trigger level in volts (:TRIGger:EDGE:LEVel)")]

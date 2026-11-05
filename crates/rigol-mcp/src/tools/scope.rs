@@ -118,6 +118,7 @@ pub async fn configure_edge_trigger(
 ) -> Result<Value> {
     let cfg = EdgeTriggerConfig {
         channel: p.channel,
+        digital: p.digital,
         slope: p.slope,
         level_volts: p.level_volts,
         sweep: p.sweep,

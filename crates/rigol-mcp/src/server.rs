@@ -557,7 +557,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:…, :TRIGger:SWEep). Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:SOURce CHANnel<n>|D<n>, :TRIGger:EDGE:SLOPe, :TRIGger:EDGE:LEVel, :TRIGger:SWEep). The source is an analog channel or, on the DHO900 series, a digital channel D0–D15. Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn configure_edge_trigger(
         &self,

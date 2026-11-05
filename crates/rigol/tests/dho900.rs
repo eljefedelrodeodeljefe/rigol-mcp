@@ -2,8 +2,8 @@
 //! captured from a DHO924S on firmware 00.01.05.
 
 use rigol::{
-    ChannelConfig, Coupling, Dho900, EdgeTriggerConfig, Error, Family, GeneratorConfig,
-    GeneratorLimits, MeasureItem, SessionConfig, Slope, Sweep, Waveshape,
+    ChannelConfig, Coupling, Dho900, DigitalChannel, EdgeTriggerConfig, Error, Family,
+    GeneratorConfig, GeneratorLimits, MeasureItem, SessionConfig, Slope, Sweep, Waveshape,
 };
 use rigol_fake::{Fake, Reply, Step, step};
 
@@ -325,6 +325,7 @@ async fn an_edge_trigger_change_uses_guide_spellings() {
     let applied = scope
         .configure_edge_trigger(&EdgeTriggerConfig {
             channel: Some(2),
+            digital: None,
             slope: Some(Slope::Falling),
             level_volts: Some(1.5),
             sweep: Some(Sweep::Single),
@@ -335,6 +336,94 @@ async fn an_edge_trigger_change_uses_guide_spellings() {
     assert_eq!(applied.state.source, "CHAN2");
     assert_eq!(applied.state.level_volts, 1.5);
     fake.finish();
+}
+
+#[tokio::test]
+async fn an_edge_trigger_can_watch_a_digital_channel() {
+    // Captured from a DHO924S (00.01.05) with a PLA2216 probe on D0; the
+    // level reply format is the one :TRIGger:EDGE:LEVel? gives for 0.4 V,
+    // 4.000000E-1.
+    let (fake, scope) = connect(vec![
+        step("*CLS", Reply::None),
+        step(":TRIGger:MODE EDGE", Reply::None),
+        step(":TRIGger:EDGE:SOURce D0", Reply::None),
+        step(":TRIGger:EDGE:SLOPe NEGative", Reply::None),
+        step(":TRIGger:EDGE:LEVel 1.65", Reply::None),
+        step(":TRIGger:MODE?", Reply::line("EDGE")),
+        step(":TRIGger:EDGE:SOURce?", Reply::line("D0")),
+        step(":TRIGger:EDGE:SLOPe?", Reply::line("NEG")),
+        step(":TRIGger:EDGE:LEVel?", Reply::line("1.650000E0")),
+        step(":TRIGger:SWEep?", Reply::line("NORM")),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
+    ])
+    .await;
+
+    let applied = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            digital: Some(DigitalChannel::D0),
+            slope: Some(Slope::Falling),
+            level_volts: Some(1.65),
+            ..EdgeTriggerConfig::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(applied.state.source, "D0");
+    assert!(applied.instrument_errors.is_empty());
+    fake.finish();
+}
+
+#[tokio::test]
+async fn two_trigger_sources_are_refused_before_sending() {
+    let (fake, scope) = connect(vec![]).await;
+    let result = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            channel: Some(1),
+            digital: Some(DigitalChannel::D3),
+            ..EdgeTriggerConfig::default()
+        })
+        .await;
+    assert!(matches!(result, Err(Error::Conflicting(_))), "{result:?}");
+    fake.finish();
+}
+
+#[tokio::test]
+async fn a_dho800_refuses_a_digital_trigger_before_sending() {
+    let fake = Fake::start(vec![step(
+        "*IDN?",
+        Reply::line("RIGOL TECHNOLOGIES,DHO804,DHO8A000000001,00.01.05"),
+    )])
+    .await;
+    let scope = Dho900::connect(
+        &fake.addr.ip().to_string(),
+        Some(fake.addr.port()),
+        SessionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = scope
+        .configure_edge_trigger(&EdgeTriggerConfig {
+            digital: Some(DigitalChannel::D0),
+            ..EdgeTriggerConfig::default()
+        })
+        .await;
+    assert!(
+        matches!(result, Err(Error::NotOnThisModel { .. })),
+        "{result:?}"
+    );
+    fake.finish();
+}
+
+#[test]
+fn digital_channels_map_to_guide_names_and_pods() {
+    assert_eq!(DigitalChannel::ALL.len(), 16);
+    for (n, d) in DigitalChannel::ALL.iter().enumerate() {
+        assert_eq!(usize::from(d.number()), n);
+        assert_eq!(serde_json::to_value(d).unwrap(), format!("D{n}"));
+    }
+    assert_eq!(DigitalChannel::D7.pod(), 1);
+    assert_eq!(DigitalChannel::D8.pod(), 2);
 }
 
 #[tokio::test]

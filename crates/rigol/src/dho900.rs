@@ -168,6 +168,66 @@ impl Slope {
     }
 }
 
+/// A digital channel of the logic analyser, D0 to D15 in Programming Guide
+/// terms. DHO900 series only; POD1 carries D0–D7 and POD2 D8–D15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "UPPERCASE")]
+pub enum DigitalChannel {
+    D0,
+    D1,
+    D2,
+    D3,
+    D4,
+    D5,
+    D6,
+    D7,
+    D8,
+    D9,
+    D10,
+    D11,
+    D12,
+    D13,
+    D14,
+    D15,
+}
+
+impl DigitalChannel {
+    /// Every digital channel, D0 first.
+    pub const ALL: [Self; 16] = [
+        Self::D0,
+        Self::D1,
+        Self::D2,
+        Self::D3,
+        Self::D4,
+        Self::D5,
+        Self::D6,
+        Self::D7,
+        Self::D8,
+        Self::D9,
+        Self::D10,
+        Self::D11,
+        Self::D12,
+        Self::D13,
+        Self::D14,
+        Self::D15,
+    ];
+
+    /// The channel number, 0 to 15.
+    pub fn number(self) -> u8 {
+        self as u8
+    }
+
+    /// The pod that carries this channel: 1 for D0–D7, 2 for D8–D15.
+    pub fn pod(self) -> u8 {
+        if self.number() < 8 { 1 } else { 2 }
+    }
+
+    fn scpi(self) -> String {
+        format!("D{}", self.number())
+    }
+}
+
 /// When the scope acquires (`:TRIGger:SWEep`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -208,10 +268,14 @@ pub struct ChannelConfig {
 }
 
 /// Changes to the edge trigger. `None` leaves a setting alone.
+///
+/// The source is `channel` or `digital`, never both.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EdgeTriggerConfig {
     /// Analog channel the trigger watches.
     pub channel: Option<u8>,
+    /// Digital channel the trigger watches (DHO900 series only).
+    pub digital: Option<DigitalChannel>,
     pub slope: Option<Slope>,
     pub level_volts: Option<f64>,
     pub sweep: Option<Sweep>,
@@ -846,16 +910,29 @@ impl Dho900 {
         &self,
         cfg: &EdgeTriggerConfig,
     ) -> Result<Applied<EdgeTrigger>> {
-        if let Some(ch) = cfg.channel {
-            self.check_channel(ch)?;
-        }
+        let source = match (cfg.channel, cfg.digital) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Conflicting(
+                    "give an analog channel or a digital channel as the trigger source, not both",
+                ));
+            }
+            (Some(ch), None) => {
+                self.check_channel(ch)?;
+                Some(format!("CHANnel{ch}"))
+            }
+            (None, Some(d)) => {
+                self.check_digital()?;
+                Some(d.scpi())
+            }
+            (None, None) => None,
+        };
         check_finite("trigger level (V)", cfg.level_volts)?;
 
         self.session.clear_status().await?;
         self.session.command(":TRIGger:MODE EDGE").await?;
-        if let Some(ch) = cfg.channel {
+        if let Some(src) = source {
             self.session
-                .command(&format!(":TRIGger:EDGE:SOURce CHANnel{ch}"))
+                .command(&format!(":TRIGger:EDGE:SOURce {src}"))
                 .await?;
         }
         if let Some(s) = cfg.slope {
@@ -985,6 +1062,19 @@ impl Dho900 {
             200e-6
         } else {
             500e-6
+        }
+    }
+
+    /// Digital channels and the logic analyser exist on the DHO900 series
+    /// only (Programming Guide, `:LA` commands).
+    fn check_digital(&self) -> Result<()> {
+        if self.identity.model.to_ascii_uppercase().starts_with("DHO9") {
+            Ok(())
+        } else {
+            Err(Error::NotOnThisModel {
+                what: "digital channels (D0-D15)",
+                model: self.identity.model.clone(),
+            })
         }
     }
 
