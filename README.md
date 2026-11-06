@@ -6,7 +6,7 @@
 [![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io)
 
 **Let an AI agent drive your bench: RIGOL power supplies and oscilloscopes over SCPI, with
-safety limits enforced in the library, not in the prompt.**
+safety limits enforced in the library, below the MCP layer.**
 
 A Rust SDK and an [MCP](https://modelcontextprotocol.io) server. Point Claude Code, Cursor or
 any MCP client at a DP800 power supply and a DHO800/DHO900 oscilloscope, and ask it to power a
@@ -14,7 +14,7 @@ rail and catch the rise on the scope.
 
 ![A DHO924S screen, returned to the agent by get_screenshot](docs/get_screenshot.png)
 
-*The scope's screen as an agent sees it — returned as an image by `get_screenshot`.*
+*The scope's screen as an agent sees it, returned as an image by `get_screenshot`.*
 
 ## Supported instruments
 
@@ -24,21 +24,21 @@ rail and catch the rise on the scope.
 | `dho900` | DHO802, DHO804, DHO812, DHO814, DHO914(S), DHO924(S) | DHO924S, firmware `00.01.05` |
 
 One process drives one instrument. A PSU and a scope are two server entries, each with its own
-address and its own write gate — so a scope can be fully writable while the PSU stays read-only,
-and a stuck scope session can never block a PSU `output_off`.
+address and its own write gate. A scope can be writable while the PSU stays read-only, and a
+stuck scope session cannot block a PSU `output_off`.
 
-## Safety
+## A wrong write can destroy the board under test
 
-**This drives real power into real hardware.** A wrong write does not cost you
-connectivity, it costs you a board. Three things follow from that:
+**This drives real power into real hardware, and a wrong write can cost you a board.** The
+design follows from that:
 
-1. **Ceilings are enforced in the library**, below the MCP layer. No tool argument, prompt,
-   or future caller can bypass them — callers never see the check, they just get an error.
+1. **Ceilings are enforced in the library**, below the MCP layer. No tool argument, prompt
+   or future caller can bypass them. A caller does not see the check; it gets an error.
    - PSU: per channel, volts and amps.
-   - Scope signal generator: amplitude, and the **peak** `|offset| + amplitude/2` — the
-     value that actually reaches the device under test. Each can be in range while the
+   - Scope signal generator: amplitude, and the **peak** `|offset| + amplitude/2` that
+     reaches the device under test. Each can be in range while the
      pair is not.
-2. **A ceiling is never unlimited.** Unconfigured, it defaults to what the hardware can do:
+2. **Every ceiling has a finite default.** Unconfigured, it is what the hardware can do:
    the channel's own rating on a PSU (30V/3A, 30V/3A, 5V/3A on a DP832A), the generator's own
    10 Vpp / 5 V peak on a scope.
 3. **Configuring and energising are separate operations.** Setting a voltage never turns a
@@ -47,20 +47,19 @@ connectivity, it costs you a board. Three things follow from that:
    were changed on the front panel. When the generator output is already on, settings change
    in an order that keeps every intermediate state inside the ceilings too.
 
-A refused value comes back as an MCP *invalid params* error, not an internal error — so a
-model understands it should lower the value rather than retry the same call.
+A refused value comes back as an MCP *invalid params* error. That code tells the model to
+change the arguments, so it lowers the value instead of retrying the same call.
 
-`RIGOL_ALLOW_WRITES` gates mutating tools, but understand what it is: **a convenience
-guard, not a security boundary.** Anyone who can reach tcp/5555 can drive the instrument
-directly, with or without this server. It protects against an agent making a mistake, not
-against an attacker.
+`RIGOL_ALLOW_WRITES` gates mutating tools. **It guards against an agent's mistakes and gives
+no protection from an attacker:** anyone who can reach tcp/5555 can drive the instrument
+directly, with or without this server.
 
 The ceilings likewise constrain *this client only*. The front panel and any other LAN
-client are unaffected. This is not a hardware interlock.
+client are unaffected, so the ceilings do not replace a hardware interlock.
 
 ## Install
 
-**Release binary** (Linux and macOS, x86_64 and aarch64) — download from
+**Release binary** (Linux and macOS, x86_64 and aarch64): download from
 [Releases](https://github.com/eljefedelrodeodeljefe/rigol-mcp/releases), unpack, and put
 `rigol-mcp` on your `PATH`. Each release also carries a CycloneDX and SPDX SBOM.
 
@@ -115,8 +114,8 @@ A PSU and a scope side by side, in `.mcp.json`:
 ```
 
 Here the scope is writable and the PSU is read-only. An agent can arm the scope with `single`,
-and you switch the rail on yourself — or set `RIGOL_ALLOW_WRITES` on the PSU too, once you
-trust the ceilings.
+and you switch the rail on yourself. Once you trust the ceilings, set `RIGOL_ALLOW_WRITES` on the
+PSU too.
 
 ## Tools
 
@@ -148,11 +147,11 @@ trust the ceilings.
 | `get_generator` | Signal generator state and its ceilings | — |
 | `get_logic_analyzer` | Logic analyser on/off, pod thresholds, which of D0–D15 are shown (DHO900) | — |
 | `run` / `stop` / `single` / `autoset` | Acquisition control | writes |
-| `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns what the scope actually holds. The edge trigger takes an analog channel or a digital channel D0–D15 | writes |
+| `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns the values the scope reads back. The edge trigger takes an analog channel or a digital channel D0–D15 | writes |
 | `clear_measurements` | Empty the on-screen measurement list | writes |
 | `reset_measurement_statistics` | Restart every item's statistics (`:MEASure:STATistic:RESet`) | writes |
 | `configure_logic_analyzer` | Logic analyser on/off, show/hide D0–D15, pod thresholds (DHO900) | writes |
-| `configure_generator` | Waveform, frequency, amplitude, offset — output stays off | writes |
+| `configure_generator` | Waveform, frequency, amplitude, offset (output stays off) | writes |
 | `generator_output_on` / `generator_output_off` | Drive or stop the signal | writes |
 
 Every tool's description names the SCPI command it sends, in Programming Guide terms.
@@ -186,60 +185,61 @@ of every query the firmware accepts. `--write` adds a fixed list of display, tri
 logic-analyser set commands, each read, set, read back and error-checked, then puts every
 setting back. It never touches the signal generator.
 
-## Firmware quirks worth knowing
+## Firmware quirks
 
 ### DP800
 
 Measured against a DP832A on `00.01.19`. Several of these contradict the DP800 Programming
-Guide, and cost real time to rediscover:
+Guide:
 
-- **The raw SCPI port is 5555.** tcp/5025 — the LXI-conventional one — is closed. tcp/111
+- **The raw SCPI port is 5555.** tcp/5025 (the LXI-conventional port) is closed. tcp/111
   serves VXI-11 via ONC-RPC portmap, but the raw socket has identical capability without
   the XDR machinery, so this crate does not implement VXI-11.
 - **Abbreviated command forms win.** `:OUTP:OVP:ALAR?` is accepted; the guide's long-form
   `:OUTP:OVP:ALARm?` is rejected with `-113 Undefined header`.
-- **The alarm queries answer `YES`/`NO`**, not `ON`/`OFF` like the state queries.
+- **The alarm queries answer `YES`/`NO`**; the state queries answer `ON`/`OFF`.
 - **Several documented LAN queries do not exist here.** `:SYST:COMM:LAN:SMAS?`, `:AIP?`,
   `:MANU?` and `:VISA?` all return empty and push `-113`. The accepted spellings are
-  `:MASK?`, `:AUTO?`, `:MAN?` — and even `:MASK?` returns an empty string, so "supported"
-  and "populated" are separate facts. `get_lan_config` probes rather than assumes.
+  `:MASK?`, `:AUTO?` and `:MAN?`. Even `:MASK?` returns an empty string, so "supported" and
+  "populated" are separate facts. `get_lan_config` sends each query, leaves every field optional
+  and lists the queries that answered with a value.
 - **`:APPL? CHn` returns the channel rating *and* its setpoints** in one reply:
   `CH1:30V/3A,0.000,3.000`. That rating is what seeds an unconfigured safety ceiling.
 - **The MAC comes back hyphen-separated** (`00-19-AF-…`); the library normalises it to colons.
 - **The instrument is fragile under scanning.** A full `nmap -p-` sweep wedged it for about
-  ninety seconds — it stopped answering entirely. Probe sequentially. Nothing in this crate
+  ninety seconds, during which it answered nothing. Probe sequentially. Nothing in this crate
   sweeps.
 - **It advertises no mDNS/LXI record**, so there is no name to discover it by. Address it
   by IP, or find it by its Rigol OUI `00:19:AF` in an ARP table.
-- Latency is comfortable — around 10–110 ms per query on a quiet LAN. The 5 s default
-  timeout is generous on purpose, not because the instrument is slow.
+- Latency is around 10–110 ms per query on a quiet LAN. The 5 s default timeout leaves a
+  wide margin over that on purpose.
 
 ### DHO800/DHO900
 
 Measured against a DHO924S on `00.01.05`:
 
 - **Send each command and its newline in one TCP segment.** With `TCP_NODELAY`, a command
-  written in two pieces loses its reply about one time in nine — it looks exactly like an
+  written in two pieces loses its reply about one time in nine, and the failure looks like an
   unsupported command timing out. The library always sends one write per command.
-- **An unsupported query gets no reply at all**, not an error. That is why every parameter
+- **An unsupported query gets no reply and no error.** That is why every parameter
   in this crate is a closed enum: there is no way to send a spelling the firmware has not
   been seen to accept.
 - **`9.9E37` means "cannot measure"** (a frequency with no edges on screen). `measure`
   returns `null` for it.
-- **`:MEASure:ITEM?` is not a pure read**: it also adds the item to the scope's on-screen
+- **`:MEASure:ITEM?` also writes**: it adds the item to the scope's on-screen
   measurement list, as the front panel would. `clear_measurements` removes them.
 - **Older-series spellings don't apply.** Autoscale is `:AUToset`, and `:MEASure:CLEar` takes
   no parameter (`:MEASure:CLEar ALL` is `-108 Parameter not allowed`).
 - **Waveforms default to `WORD` format**: 16-bit, little-endian. Volts are
   `(raw − yorigin − yreference) × yincrement` from `:WAVeform:PREamble?`.
-- **The MAC's case depends on the interface** — upper-case over LAN, lower-case over USB.
+- **The MAC's case depends on the interface**: upper-case over LAN, lower-case over USB.
   The library normalises it.
 - **The error queue uses `-100,"Command err"`** where a DP832A says `-113`.
 - **Logic-analyser pod thresholds read back in volts times 10¹⁸**: after
   `:LA:POD1:THReshold 1.65`, `:LA:POD1:THReshold?` answers `1.650000E+18`. The library scales
-  it back to volts. Sending that reply back as a setting does not round-trip, it clamps.
-- **Thresholds clamp at ±15 V without an error**, not the guide's ±20 V: `20` reads back as
-  `1.500000E+19`. The library refuses anything beyond ±15 V rather than let it clamp.
+  it back to volts. Sending that reply back as a setting clamps to the ±15 V limit.
+- **Thresholds clamp at ±15 V without an error**, where the guide says ±20 V: `20` reads back
+  as `1.500000E+19`. The library refuses anything beyond ±15 V, so no value clamps silently.
 - **`:LA:ENABle 0` hides every digital channel, and `:LA:ENABle 1` shows D0–D7 again**,
   whatever was shown before. `configure_logic_analyzer` turns the analyser on before applying
   `show`, so one call can restore any set.
