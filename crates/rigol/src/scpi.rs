@@ -245,7 +245,10 @@ async fn open(addr: &str, timeout: Duration) -> Result<BufReader<TcpStream>> {
             cmd: format!("connect {addr}"),
             waited: timeout,
         })??;
-    let _ = stream.set_nodelay(true);
+    // Not fatal: write_line sends each command in one write regardless.
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!(%addr, error = %e, "could not set TCP_NODELAY");
+    }
     Ok(BufReader::new(stream))
 }
 

@@ -419,7 +419,9 @@ impl Dp800 {
         let manual_ip = self.probe(":SYST:COMM:LAN:MAN?", &mut supported).await;
 
         // Undocumented headers land in the error queue; do not leave ours there.
-        let _ = self.session.clear_status().await;
+        if let Err(e) = self.session.clear_status().await {
+            tracing::warn!(error = %e, "could not clear the error queue after the LAN probe");
+        }
 
         Ok(LanConfig {
             mac: mac.as_deref().map(normalise_mac),
