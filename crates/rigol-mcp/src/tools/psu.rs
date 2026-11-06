@@ -47,7 +47,7 @@ pub async fn limits(psu: &Dp800) -> Result<Value> {
     let mut out = Vec::new();
     for ch in 1..=3u8 {
         let r = psu.limits().ceiling(ch)?;
-        out.push(json!({ "channel": ch, "max_volts": r.volts, "max_amps": r.amps }));
+        out.push(json!({ "channel": ch, "max_volts": r.volts(), "max_amps": r.amps() }));
     }
     Ok(Value::Array(out))
 }

@@ -304,8 +304,8 @@ async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
         let o = psu.output_state(ch).await?;
         tracing::info!(
             "  CH{ch}  rated {:>5.1}V/{:.1}A   set {:>6.3}V/{:.3}A   meas {:>6.4}V/{:.4}A/{:.3}W   output {:?}",
-            c.rating.volts,
-            c.rating.amps,
+            c.rating.volts(),
+            c.rating.amps(),
             c.setpoint.volts,
             c.setpoint.amps,
             m.volts,
@@ -318,7 +318,7 @@ async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("── resolved safety ceilings (backfilled from ratings) ──");
     for ch in 1..=3u8 {
         let r = psu.limits().ceiling(ch)?;
-        tracing::info!("  CH{ch}  max {:.1}V / {:.1}A", r.volts, r.amps);
+        tracing::info!("  CH{ch}  max {:.1}V / {:.1}A", r.volts(), r.amps());
     }
 
     tracing::info!("── open question 2: protection subsystem ──");
@@ -350,8 +350,8 @@ async fn probe_psu(host: &str) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("── latency of a single query (open question: timeout budget) ──");
     for i in 1..=3 {
         let t = Instant::now();
-        let _ = psu.session().query("*IDN?").await?;
-        tracing::info!("  *IDN? #{i}  {:?}", t.elapsed());
+        psu.output_state(1).await?;
+        tracing::info!("  :OUTP? CH1 #{i}  {:?}", t.elapsed());
     }
 
     tracing::info!("── error queue ──");

@@ -17,11 +17,16 @@ use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 ///
 /// Also the shape of a safety ceiling, so both values are finite and above
 /// zero: a NaN ceiling compares false against every request and would allow
-/// all of them.
+/// all of them. The fields are private so a struct literal cannot skip
+/// [`Rating::new`]:
+///
+/// ```compile_fail
+/// let unlimited = rigol::Rating { volts: f64::NAN, amps: f64::NAN };
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Rating {
-    pub volts: f64,
-    pub amps: f64,
+    volts: f64,
+    amps: f64,
 }
 
 impl Rating {
@@ -29,6 +34,14 @@ impl Rating {
         positive("voltage rating or ceiling (V)", volts)?;
         positive("current rating or ceiling (A)", amps)?;
         Ok(Self { volts, amps })
+    }
+
+    pub fn volts(&self) -> f64 {
+        self.volts
+    }
+
+    pub fn amps(&self) -> f64 {
+        self.amps
     }
 }
 
@@ -179,6 +192,15 @@ pub struct LanConfig {
     pub supported_queries: Vec<String>,
 }
 
+/// A DP800-series power supply. Every write goes through the ceilings in
+/// [`Limits`]; the SCPI session underneath is not handed out, because a raw
+/// command would go around them:
+///
+/// ```compile_fail
+/// async fn bypass(psu: &rigol::Dp800) {
+///     psu.session().command(":SOUR1:VOLT 30").await.unwrap();
+/// }
+/// ```
 pub struct Dp800 {
     session: Session,
     limits: Limits,
@@ -245,10 +267,6 @@ impl Dp800 {
 
     pub fn limits(&self) -> &Limits {
         &self.limits
-    }
-
-    pub fn session(&self) -> &Session {
-        &self.session
     }
 
     async fn read_channel(session: &Session, channel: u8) -> Result<Channel> {

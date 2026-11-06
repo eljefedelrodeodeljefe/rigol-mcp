@@ -61,13 +61,13 @@ impl Limits {
     pub fn check_voltage(&self, channel: u8, requested: f64) -> Result<()> {
         let ceiling = self.ceiling(channel)?;
         finite("voltage (V)", requested)?;
-        if requested > ceiling.volts {
+        if requested > ceiling.volts() {
             return Err(Error::LimitExceeded {
                 what: "voltage",
                 unit: "V",
                 channel,
                 requested,
-                ceiling: ceiling.volts,
+                ceiling: ceiling.volts(),
             });
         }
         Ok(())
@@ -78,13 +78,13 @@ impl Limits {
     pub fn check_current(&self, channel: u8, requested: f64) -> Result<()> {
         let ceiling = self.ceiling(channel)?;
         finite("current (A)", requested)?;
-        if requested > ceiling.amps {
+        if requested > ceiling.amps() {
             return Err(Error::LimitExceeded {
                 what: "current",
                 unit: "A",
                 channel,
                 requested,
-                ceiling: ceiling.amps,
+                ceiling: ceiling.amps(),
             });
         }
         Ok(())

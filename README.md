@@ -176,6 +176,10 @@ flight, binary block reads, reconnect after a failed exchange so a late reply ca
 paired with the next query). Enable its `schemars` feature for JSON Schema on the parameter
 enums.
 
+The device models keep their session private and the ceilings are built only through
+validating constructors, so code that drives an instrument through `Dp800` or `Dho900` cannot
+go around them. A `Session` you open yourself checks nothing.
+
 ```sh
 cargo run -p rigol --example probe -- 192.0.2.20
 ```

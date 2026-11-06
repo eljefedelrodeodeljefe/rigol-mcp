@@ -3,10 +3,14 @@
 //! Three layers, deliberately separable:
 //!
 //! - [`scpi::Session`] — the transport. A newline-framed ASCII line protocol over
-//!   TCP, with one command in flight at a time.
-//! - [`limits::Limits`] — per-channel safety ceilings, checked *here* rather than
-//!   in any caller, so nothing above can bypass them.
-//! - [`dp800::Dp800`] — the typed device model for the DP800 series.
+//!   TCP, with one command in flight at a time. It checks nothing: a command
+//!   sent through a session you open yourself is not held to any ceiling.
+//! - [`limits::Limits`] and [`generator::GeneratorLimits`] — safety ceilings,
+//!   checked *here* rather than in any caller, and built only through
+//!   validating constructors.
+//! - [`dp800::Dp800`] and [`dho900::Dho900`] — the typed device models. They
+//!   keep their session private, so nothing that drives an instrument through
+//!   one can bypass its ceilings.
 //!
 //! Deliberately not VXI-11: the instrument exposes ONC-RPC portmap on tcp/111,
 //! but the raw socket is a line protocol with identical capability and none of

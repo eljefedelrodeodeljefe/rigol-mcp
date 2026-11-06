@@ -575,7 +575,7 @@ async fn acquisition_control_uses_guide_spellings() {
         step(":SINGle", Reply::None),
         step(":AUToset", Reply::None),
         step(":MEASure:CLEar", Reply::None),
-        step("*IDN?", Reply::line(IDN)),
+        step(":SYST:ERR?", Reply::line(r#"0,"No error""#)),
     ])
     .await;
 
@@ -585,7 +585,7 @@ async fn acquisition_control_uses_guide_spellings() {
     scope.autoset().await.unwrap();
     scope.clear_measurements().await.unwrap();
     // A query, so the fake has seen every command before finish().
-    scope.session().query("*IDN?").await.unwrap();
+    scope.errors().await.unwrap();
 
     fake.finish();
 }

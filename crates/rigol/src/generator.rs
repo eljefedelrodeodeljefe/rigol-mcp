@@ -83,12 +83,23 @@ impl Waveshape {
 }
 
 /// Ceilings on what the generator may put on its output.
+///
+/// Built only through [`GeneratorLimits::new`], which validates, or
+/// [`Default`], the hardware range. The fields are private so a struct
+/// literal cannot skip the validation:
+///
+/// ```compile_fail
+/// let unlimited = rigol::GeneratorLimits {
+///     max_vpp: f64::INFINITY,
+///     max_peak_volts: f64::INFINITY,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct GeneratorLimits {
-    pub max_vpp: f64,
+    max_vpp: f64,
     /// Largest `|offset| + amplitude / 2` (the signal's furthest excursion
     /// from 0 V).
-    pub max_peak_volts: f64,
+    max_peak_volts: f64,
 }
 
 impl Default for GeneratorLimits {
@@ -129,6 +140,16 @@ impl GeneratorLimits {
             max_vpp,
             max_peak_volts,
         })
+    }
+
+    /// Largest amplitude allowed, in Vpp.
+    pub fn max_vpp(&self) -> f64 {
+        self.max_vpp
+    }
+
+    /// Largest `|offset| + amplitude / 2` allowed, in volts.
+    pub fn max_peak_volts(&self) -> f64 {
+        self.max_peak_volts
     }
 
     /// Refuses a combination whose amplitude or peak is over a ceiling, or
@@ -371,7 +392,7 @@ mod tests {
     #[test]
     fn defaults_are_the_hardware_range_never_unlimited() {
         let d = GeneratorLimits::default();
-        assert_eq!((d.max_vpp, d.max_peak_volts), (10.0, 5.0));
+        assert_eq!((d.max_vpp(), d.max_peak_volts()), (10.0, 5.0));
         assert!(GeneratorLimits::new(12.0, 3.0).is_err());
         assert!(GeneratorLimits::new(3.0, f64::INFINITY).is_err());
         assert!(GeneratorLimits::new(0.0, 1.0).is_err());

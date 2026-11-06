@@ -596,6 +596,15 @@ impl Waveform {
     }
 }
 
+/// A DHO800/DHO900-series oscilloscope. Signal-generator writes go through
+/// the ceilings in [`GeneratorLimits`]; the SCPI session underneath is not
+/// handed out, because a raw command would go around them:
+///
+/// ```compile_fail
+/// async fn bypass(scope: &rigol::Dho900) {
+///     scope.session().command(":SOURce:VOLTage:AMPLitude 10").await.unwrap();
+/// }
+/// ```
 pub struct Dho900 {
     session: Session,
     identity: Identity,
@@ -661,11 +670,6 @@ impl Dho900 {
     /// Analog channels on this model.
     pub fn channel_count(&self) -> u8 {
         self.channels
-    }
-
-    /// The raw session, for diagnostics.
-    pub fn session(&self) -> &Session {
-        &self.session
     }
 
     pub async fn errors(&self) -> Result<Vec<InstrumentError>> {
