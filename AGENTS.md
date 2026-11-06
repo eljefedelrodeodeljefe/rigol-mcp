@@ -73,8 +73,16 @@ these rules:
   keep its exhaustive test.
 - Never make a setpoint or generator configuration write energise an output as a side
   effect.
-- Every `output_on` and `generator_output_on` logs its settings at info level, and the
-  generator re-checks its current settings before turning on.
+- Every write logs one info line with its operation, channel and values; every `output_on`
+  and `generator_output_on` logs the settings it energises.
+- `output_on` re-checks the channel's voltage and current setpoints against the ceilings, and
+  `generator_output_on` re-checks the generator's settings, before turning on. A setpoint
+  can change on the front panel.
+- Ceilings are finite and above zero. A NaN ceiling compares false against every request, so
+  every constructor validates and every check refuses a non-finite request.
+- A generator or PSU write holds the instrument's operation lock from its check to its last
+  command. rmcp runs requests concurrently, and two writes planned from the same state can
+  each fit the ceilings and exceed them together.
 - Send each SCPI command and its newline in one write. DHO firmware drops the reply to a
   command split across TCP segments.
 - Never add anything that sweeps ports or brute-forces command spellings against an
@@ -86,8 +94,10 @@ these rules:
 All commits must pass `prek run --all-files`:
 
 - `cargo fmt`
-- `cargo clippy --all-targets -- -D warnings`: **`#[allow]` escapes are refused**; fix the
-  lint instead
+- `cargo clippy --all-targets -- -D warnings`: fix the lint where you can. Where a lint is
+  wrong for one site, put `#[expect(clippy::lint, reason = "…")]` on that site; it errors
+  once the lint stops firing. **A bare `#[allow]` is refused.** A crate- or workspace-wide
+  allow goes in `[workspace.lints]` with a comment giving the reason.
 - `cargo test --all`
 - `typos`, TOML/YAML validation, markdownlint
 
