@@ -1,4 +1,4 @@
-# AGENTS.md — conventions for `rigol-mcp`
+# AGENTS.md: conventions for `rigol-mcp`
 
 Ported from `mikrotik-mcp` so muscle memory transfers between the two.
 
@@ -42,7 +42,7 @@ without an MCP runtime, because it publishes separately.
 
 ## Adding a tool
 
-Three steps, in order:
+Add a tool in this order:
 
 1. A parameter struct in `crates/rigol-mcp/src/params/{domain}.rs`, deriving `Deserialize`
    and `JsonSchema`, with `#[schemars(description = "…")]` on each field.
@@ -58,17 +58,17 @@ description.
 
 New SCPI commands come from the Programming Guide and are checked one at a time on a real
 instrument, with `examples/probe.rs`, before any tool depends on them. Instrument parameters
-are closed enums, never free strings: on DHO firmware an unknown query gets no reply at all.
+are closed enums, because on DHO firmware an unknown query gets no reply at all.
 Tests run against `rigol-fake` with replies captured from the instrument.
 
 ## Safety rules specific to this server
 
-This drives a power supply and a signal generator into real hardware. These are not
-negotiable:
+This drives a power supply and a signal generator into real hardware. Every change keeps
+these rules:
 
-- Ceilings are checked in the library (`rigol::limits`, `rigol::generator`), never in the
+- Ceilings are checked only in the library (`rigol::limits`, `rigol::generator`), below the
   tool layer. Do not add a parameter that relaxes them.
-- Generator ceilings bound the peak, `|offset| + amplitude/2`, not only each value. Keep
+- Generator ceilings bound each value and the peak, `|offset| + amplitude/2`. Keep
   `generator::plan` ordering commands so every intermediate state stays inside them, and
   keep its exhaustive test.
 - Never make a setpoint or generator configuration write energise an output as a side
@@ -86,7 +86,7 @@ negotiable:
 All commits must pass `prek run --all-files`:
 
 - `cargo fmt`
-- `cargo clippy --all-targets -- -D warnings` — **`#[allow]` escapes are refused**; fix the
+- `cargo clippy --all-targets -- -D warnings`: **`#[allow]` escapes are refused**; fix the
   lint instead
 - `cargo test --all`
 - `typos`, TOML/YAML validation, markdownlint
@@ -99,8 +99,8 @@ with Grype, both installed from pinned, checksum-verified release tarballs.
 - At release time it runs **informational**: findings are reported and the SBOMs are
   attached to the release, but nothing blocks a release that is already published.
 - The weekly schedule runs **gating**: it fails on CRITICAL or HIGH findings that have a fix
-  available. Fix those by bumping the dependency in `Cargo.lock`. A finding with no fix is
-  noted in the PR that triages it, not suppressed.
+  available. Fix those by bumping the dependency in `Cargo.lock`. A finding with no fix stays
+  unsuppressed and is noted in the PR that triages it.
 
 ## Runtime
 
