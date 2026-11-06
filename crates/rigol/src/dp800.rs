@@ -5,6 +5,7 @@
 //! the firmware-quirks section of the README.
 
 use serde::Serialize;
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::idn::Family;
@@ -182,6 +183,10 @@ pub struct Dp800 {
     session: Session,
     limits: Limits,
     identity: Identity,
+    /// Held across every write, from its check to its last command, so a
+    /// check and the write it permits are never split by another caller's
+    /// write. The session serialises single commands only.
+    operation: Mutex<()>,
 }
 
 impl Dp800 {
@@ -230,6 +235,7 @@ impl Dp800 {
             session,
             limits,
             identity,
+            operation: Mutex::new(()),
         })
     }
 
@@ -289,6 +295,7 @@ impl Dp800 {
 
     pub async fn set_voltage(&self, channel: u8, volts: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
         self.session
             .command(&format!(":SOUR{channel}:VOLT {volts}"))
@@ -297,6 +304,7 @@ impl Dp800 {
 
     pub async fn set_current(&self, channel: u8, amps: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
         self.session
             .command(&format!(":SOUR{channel}:CURR {amps}"))
@@ -311,6 +319,7 @@ impl Dp800 {
     /// that ran before this process, can leave one above the ceiling.
     pub async fn output_on(&self, channel: u8) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         let before = self.channel(channel).await?;
         self.limits.check_voltage(channel, before.setpoint.volts)?;
         self.limits.check_current(channel, before.setpoint.amps)?;
@@ -325,6 +334,7 @@ impl Dp800 {
 
     pub async fn output_off(&self, channel: u8) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         tracing::info!(channel, "de-energising output");
         self.session
             .command(&format!(":OUTP CH{channel},OFF"))
@@ -333,6 +343,7 @@ impl Dp800 {
 
     pub async fn set_ovp(&self, channel: u8, volts: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
         self.session
             .command(&format!(":OUTP:OVP:VAL CH{channel},{volts}"))
@@ -341,6 +352,7 @@ impl Dp800 {
 
     pub async fn set_ocp(&self, channel: u8, amps: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
         self.session
             .command(&format!(":OUTP:OCP:VAL CH{channel},{amps}"))

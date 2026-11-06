@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape, plan};
@@ -600,6 +601,11 @@ pub struct Dho900 {
     identity: Identity,
     channels: u8,
     generator_limits: GeneratorLimits,
+    /// Held across each generator read-plan-write sequence. The session
+    /// serialises single commands only: two configure calls that both read
+    /// the state before either writes can each pass the ceilings and still
+    /// exceed them together.
+    operation: Mutex<()>,
 }
 
 impl Dho900 {
@@ -634,6 +640,7 @@ impl Dho900 {
             identity,
             channels,
             generator_limits: GeneratorLimits::default(),
+            operation: Mutex::new(()),
         })
     }
 
@@ -1121,6 +1128,7 @@ impl Dho900 {
         &self,
         cfg: &GeneratorConfig,
     ) -> Result<Applied<GeneratorState>> {
+        let _operation = self.operation.lock().await;
         let current = self.current_signal().await?;
         let target = cfg.apply_to(&current);
         let changes = plan(&current, &target, &self.generator_limits)?;
@@ -1138,6 +1146,7 @@ impl Dho900 {
     /// Turns the output on, after checking the settings it would put out.
     /// They may have changed on the front panel since they were configured.
     pub async fn generator_output_on(&self) -> Result<GeneratorState> {
+        let _operation = self.operation.lock().await;
         let current = self.current_signal().await?;
         self.generator_limits.check(&current)?;
         self.session.command(":SOURce:OUTPut:STATe ON").await?;
@@ -1154,6 +1163,7 @@ impl Dho900 {
     }
 
     pub async fn generator_output_off(&self) -> Result<GeneratorState> {
+        let _operation = self.operation.lock().await;
         self.session.command(":SOURce:OUTPut:STATe OFF").await?;
         tracing::info!("signal generator output off");
         self.generator().await

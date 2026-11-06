@@ -810,3 +810,94 @@ async fn output_on_within_the_ceiling_switches_on() {
     assert!(state.output_on);
     fake.finish();
 }
+
+/// The generator as a stateful fake: it applies every command it is sent
+/// and records the largest peak `|offset| + amplitude/2` the output passed
+/// through on the way.
+#[derive(Debug)]
+struct GeneratorModel {
+    amplitude_vpp: f64,
+    offset_volts: f64,
+    worst_peak: f64,
+}
+
+async fn generator_fake(model: std::sync::Arc<std::sync::Mutex<GeneratorModel>>) -> Fake {
+    let answer = move |cmd: &str| -> Option<Reply> {
+        let mut g = model.lock().unwrap();
+        let reply = match cmd {
+            "*IDN?" => Reply::line(IDN),
+            ":SOURce:FUNCtion?" => Reply::line("SIN"),
+            ":SOURce:FREQuency?" => Reply::line("1.000000E+3"),
+            ":SOURce:VOLTage:AMPLitude?" => Reply::Line(format!("{:E}", g.amplitude_vpp)),
+            ":SOURce:VOLTage:OFFSet?" => Reply::Line(format!("{:E}", g.offset_volts)),
+            ":SOURce:OUTPut:STATe?" => Reply::line("1"),
+            ":SYST:ERR?" => Reply::line(r#"0,"No error""#),
+            "*CLS" => Reply::None,
+            _ => {
+                if let Some(v) = cmd.strip_prefix(":SOURce:VOLTage:AMPLitude ") {
+                    g.amplitude_vpp = v.parse().ok()?;
+                } else {
+                    let v = cmd.strip_prefix(":SOURce:VOLTage:OFFSet ")?;
+                    g.offset_volts = v.parse().ok()?;
+                }
+                let peak = g.offset_volts.abs() + g.amplitude_vpp / 2.0;
+                g.worst_peak = g.worst_peak.max(peak);
+                Reply::None
+            }
+        };
+        Some(reply)
+    };
+    Fake::start_with(answer).await
+}
+
+/// rmcp runs each request as its own task, so two configure calls can be
+/// in flight at once. Each is inside the 3.3 V peak on its own, measured
+/// against the state it read; together they would reach 4.95 V. With the
+/// operation lock the second one reads the first one's result and is
+/// refused, and the output never leaves the envelope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_generator_changes_never_exceed_the_ceiling() {
+    use std::sync::{Arc, Mutex};
+    for _ in 0..20 {
+        let model = Arc::new(Mutex::new(GeneratorModel {
+            amplitude_vpp: 1.0,
+            offset_volts: 0.0,
+            worst_peak: 0.5,
+        }));
+        let fake = generator_fake(model.clone()).await;
+        let scope = Dho900::connect(
+            &fake.addr.ip().to_string(),
+            Some(fake.addr.port()),
+            SessionConfig::default(),
+        )
+        .await
+        .expect("connect")
+        .with_generator_limits(GeneratorLimits::new(8.0, 3.3).unwrap());
+
+        let raise_amplitude = GeneratorConfig {
+            amplitude_vpp: Some(6.6),
+            ..Default::default()
+        };
+        let raise_offset = GeneratorConfig {
+            offset_volts: Some(1.65),
+            ..Default::default()
+        };
+        let (a, b) = tokio::join!(
+            scope.configure_generator(&raise_amplitude),
+            scope.configure_generator(&raise_offset),
+        );
+
+        let g = model.lock().unwrap();
+        assert!(
+            g.worst_peak <= 3.3 + 1e-9,
+            "output reached {} V peak: {g:?}",
+            g.worst_peak
+        );
+        assert!(
+            a.is_ok() != b.is_ok(),
+            "exactly one change fits: {a:?} / {b:?}"
+        );
+        drop(g);
+        fake.finish();
+    }
+}
