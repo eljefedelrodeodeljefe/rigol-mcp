@@ -315,6 +315,7 @@ impl Dp800 {
         validate(channel)?;
         let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
+        tracing::info!(op = "set_voltage", channel, volts, "setting voltage");
         self.session
             .command(&format!(":SOUR{channel}:VOLT {volts}"))
             .await
@@ -324,6 +325,7 @@ impl Dp800 {
         validate(channel)?;
         let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
+        tracing::info!(op = "set_current", channel, amps, "setting current limit");
         self.session
             .command(&format!(":SOUR{channel}:CURR {amps}"))
             .await
@@ -342,6 +344,7 @@ impl Dp800 {
         self.limits.check_voltage(channel, before.setpoint.volts)?;
         self.limits.check_current(channel, before.setpoint.amps)?;
         tracing::info!(
+            op = "output_on",
             channel,
             volts = before.setpoint.volts,
             amps = before.setpoint.amps,
@@ -353,7 +356,7 @@ impl Dp800 {
     pub async fn output_off(&self, channel: u8) -> Result<()> {
         validate(channel)?;
         let _operation = self.operation.lock().await;
-        tracing::info!(channel, "de-energising output");
+        tracing::info!(op = "output_off", channel, "de-energising output");
         self.session
             .command(&format!(":OUTP CH{channel},OFF"))
             .await
@@ -363,6 +366,12 @@ impl Dp800 {
         validate(channel)?;
         let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
+        tracing::info!(
+            op = "set_ovp",
+            channel,
+            volts,
+            "setting over-voltage protection"
+        );
         self.session
             .command(&format!(":OUTP:OVP:VAL CH{channel},{volts}"))
             .await
@@ -372,6 +381,12 @@ impl Dp800 {
         validate(channel)?;
         let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
+        tracing::info!(
+            op = "set_ocp",
+            channel,
+            amps,
+            "setting over-current protection"
+        );
         self.session
             .command(&format!(":OUTP:OCP:VAL CH{channel},{amps}"))
             .await

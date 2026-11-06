@@ -1137,6 +1137,15 @@ impl Dho900 {
         let target = cfg.apply_to(&current);
         let changes = plan(&current, &target, &self.generator_limits)?;
 
+        tracing::info!(
+            op = "configure_generator",
+            shape = ?target.shape,
+            frequency_hz = target.frequency_hz,
+            amplitude_vpp = target.amplitude_vpp,
+            offset_volts = target.offset_volts,
+            peak_volts = target.peak_volts(),
+            "configuring signal generator"
+        );
         self.session.clear_status().await?;
         for change in &changes {
             self.session.command(&change.scpi()).await?;
@@ -1153,23 +1162,25 @@ impl Dho900 {
         let _operation = self.operation.lock().await;
         let current = self.current_signal().await?;
         self.generator_limits.check(&current)?;
-        self.session.command(":SOURce:OUTPut:STATe ON").await?;
-        let state = self.generator().await?;
+        // Logged before the command, so an energisation whose read-back
+        // fails still leaves its line.
         tracing::info!(
-            shape = ?state.shape,
-            frequency_hz = state.frequency_hz,
-            amplitude_vpp = state.amplitude_vpp,
-            offset_volts = state.offset_volts,
-            peak_volts = ?state.peak_volts,
+            op = "generator_output_on",
+            shape = ?current.shape,
+            frequency_hz = current.frequency_hz,
+            amplitude_vpp = current.amplitude_vpp,
+            offset_volts = current.offset_volts,
+            peak_volts = current.peak_volts(),
             "signal generator output ON"
         );
-        Ok(state)
+        self.session.command(":SOURce:OUTPut:STATe ON").await?;
+        self.generator().await
     }
 
     pub async fn generator_output_off(&self) -> Result<GeneratorState> {
         let _operation = self.operation.lock().await;
+        tracing::info!(op = "generator_output_off", "signal generator output off");
         self.session.command(":SOURce:OUTPut:STATe OFF").await?;
-        tracing::info!("signal generator output off");
         self.generator().await
     }
 
