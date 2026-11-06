@@ -167,6 +167,7 @@ Every tool's description names the SCPI command it sends, in Programming Guide t
 | `RIGOL_ALLOW_WRITES` | `false` | Must be `true` for any mutating tool |
 | `RIGOL_CH<n>_MAX_VOLTS` / `_MAX_AMPS` | channel rating | PSU ceiling, `n` = 1–3, set together |
 | `RIGOL_GEN_MAX_VPP` / `RIGOL_GEN_MAX_PEAK_VOLTS` | 10 / 5 | Scope generator ceilings, set together |
+| `RUST_LOG` | `info` | Log filter for stderr; every write and energisation logs at info |
 
 ## The `rigol` library
 
