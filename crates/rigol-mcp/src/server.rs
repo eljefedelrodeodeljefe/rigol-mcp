@@ -4,7 +4,7 @@ use rigol::{Dho900, Dp800, Family, GeneratorLimits, Limits, SessionConfig};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ErrorCode, ErrorData, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, ErrorCode, ErrorData, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
 };
 use serde_json::Value;
@@ -157,7 +157,7 @@ impl RigolServer {
     }
 
     fn ok(value: &Value) -> CallToolResult {
-        CallToolResult::success(vec![Content::text(
+        CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
         )])
     }
@@ -440,7 +440,7 @@ impl RigolServer {
             .await
             .map_err(tool_error)?;
         let data = base64::engine::general_purpose::STANDARD.encode(png);
-        Ok(CallToolResult::success(vec![Content::image(
+        Ok(CallToolResult::success(vec![ContentBlock::image(
             data,
             "image/png",
         )]))
@@ -651,12 +651,12 @@ impl RigolServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RigolServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let instructions = match self.family {
             Family::Dp800 => PSU_INSTRUCTIONS,
             Family::Dho900 => SCOPE_INSTRUCTIONS,
         };
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
     }
 }
