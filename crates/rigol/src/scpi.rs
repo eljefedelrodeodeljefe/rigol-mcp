@@ -12,7 +12,8 @@
 //!   instrument may still send the reply it owes, and pairing that late reply
 //!   with the next query would shift every answer after it by one. A poisoned
 //!   session reconnects before its next command. Draining is not an option —
-//!   there is no way to know whether a late reply is still coming.
+//!   there is no way to know whether a late reply is still coming. A query
+//!   whose future is dropped between write and read poisons it the same way.
 //! - Binary replies (screenshots, waveforms) are IEEE 488.2 definite-length
 //!   blocks, `#<n><len><payload>`, read by length and never by line: the
 //!   payload is binary and contains newlines.
@@ -127,8 +128,9 @@ impl Session {
     pub async fn command(&self, cmd: &str) -> Result<()> {
         let mut conn = self.ready().await?;
         tracing::debug!(%cmd, "scpi command");
+        conn.begin();
         let result = write_line(&mut conn.io, cmd).await;
-        conn.poison_on_err(result)
+        conn.finish(result)
     }
 
     /// Sends a query and reads exactly one line back.
@@ -136,6 +138,7 @@ impl Session {
         let mut conn = self.ready().await?;
         tracing::debug!(%cmd, "scpi query");
         let skip_terminator = std::mem::take(&mut conn.pending_terminator);
+        conn.begin();
         let result = async {
             write_line(&mut conn.io, cmd).await?;
             let line = read_line(&mut conn.io, cmd, self.cfg.timeout).await?;
@@ -145,7 +148,7 @@ impl Session {
             Ok(line)
         }
         .await;
-        conn.poison_on_err(result)
+        conn.finish(result)
     }
 
     /// Sends a query whose reply is an IEEE 488.2 definite-length block
@@ -161,6 +164,7 @@ impl Session {
         let mut conn = self.ready().await?;
         tracing::debug!(%cmd, "scpi block query");
         let cap = self.cfg.max_block_bytes;
+        conn.begin();
         let result = async {
             write_line(&mut conn.io, cmd).await?;
             tokio::time::timeout(timeout, read_block(&mut conn.io, cmd, cap))
@@ -171,7 +175,7 @@ impl Session {
                 })?
         }
         .await;
-        let (payload, terminator_pending) = conn.poison_on_err(result)?;
+        let (payload, terminator_pending) = conn.finish(result)?;
         conn.pending_terminator = terminator_pending;
         Ok(payload)
     }
@@ -217,12 +221,19 @@ impl Session {
 }
 
 impl Conn {
-    /// Any failure mid-exchange leaves the stream in an unknown position:
-    /// part of a reply may be buffered, or a late one may still be on its way.
-    fn poison_on_err<T>(&mut self, result: Result<T>) -> Result<T> {
-        if result.is_err() {
-            self.poisoned = true;
-        }
+    /// Marks the stream untrusted for the length of an exchange. If the
+    /// caller drops the future between the write and the read, the mark
+    /// stays, the reply still on its way is never read as the next one, and
+    /// the next call reconnects.
+    fn begin(&mut self) {
+        self.poisoned = true;
+    }
+
+    /// Ends an exchange. Any failure mid-exchange leaves the stream in an
+    /// unknown position: part of a reply may be buffered, or a late one may
+    /// still be on its way, so the session stays poisoned.
+    fn finish<T>(&mut self, result: Result<T>) -> Result<T> {
+        self.poisoned = result.is_err();
         result
     }
 }
