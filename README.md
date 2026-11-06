@@ -43,9 +43,10 @@ design follows from that:
    10 Vpp / 5 V peak on a scope.
 3. **Configuring and energising are separate operations.** Setting a voltage never turns a
    PSU output on; configuring the generator never turns its output on. Every energisation is
-   explicit and logged, and the generator re-checks its settings at output-on, in case they
-   were changed on the front panel. When the generator output is already on, settings change
-   in an order that keeps every intermediate state inside the ceilings too.
+   explicit and logged, and both the PSU and the generator re-check their settings at
+   output-on, in case they were changed on the front panel. When the generator output is
+   already on, settings change in an order that keeps every intermediate state inside the
+   ceilings too.
 
 A refused value comes back as an MCP *invalid params* error. That code tells the model to
 change the arguments, so it lowers the value instead of retrying the same call.
