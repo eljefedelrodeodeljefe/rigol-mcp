@@ -65,9 +65,8 @@ impl RigolServer {
             .unwrap_or_else(|| "5000".into())
             .parse()
             .context("RIGOL_TIMEOUT_MS must be a whole number of milliseconds")?;
-        let writes_enabled = var("RIGOL_ALLOW_WRITES")?
-            .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
+        let writes_enabled =
+            parse_bool_env("RIGOL_ALLOW_WRITES", var("RIGOL_ALLOW_WRITES")?)?.unwrap_or(false);
         let f64_var = |key: &str| env_f64(key, var(key)?);
 
         // Explicit ceilings override the channel's rating. Anything not set here
@@ -187,9 +186,28 @@ impl RigolServer {
     }
 }
 
-/// A variable's value, or `None` if it cannot be read.
-fn env_var(_key: &str, value: Result<String, VarError>) -> anyhow::Result<Option<String>> {
-    Ok(value.ok())
+/// A variable's value, `None` only when it is not set. A value that is not
+/// valid UTF-8 is an error naming the variable, not a silent default.
+fn env_var(key: &str, value: Result<String, VarError>) -> anyhow::Result<Option<String>> {
+    match value {
+        Ok(v) => Ok(Some(v)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => anyhow::bail!("{key} is not valid UTF-8"),
+    }
+}
+
+/// A boolean from an explicit allowlist, in any case. Anything else is an
+/// error naming the variable: `RIGOL_ALLOW_WRITES=on` meaning "off" is the
+/// kind of surprise a write gate must not have.
+fn parse_bool_env(key: &str, value: Option<String>) -> anyhow::Result<Option<bool>> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(Some(true)),
+        "false" | "0" | "no" => Ok(Some(false)),
+        _ => anyhow::bail!("{key} must be one of true/false, 1/0, yes/no; got {v:?}"),
+    }
 }
 
 /// A ceiling from the environment. `str::parse::<f64>` accepts `NaN` and
@@ -741,6 +759,53 @@ mod tests {
             ("RIGOL_CH1_MAX_AMPS", "0.5"),
         ]);
         assert!(good.is_ok(), "{:?}", good.err());
+    }
+
+    fn writes(value: &'static str) -> anyhow::Result<bool> {
+        let vars: &'static [_] = Box::leak(Box::new([
+            ("RIGOL_HOST", "127.0.0.1"),
+            ("RIGOL_ALLOW_WRITES", value),
+        ]));
+        config(vars).map(|s| s.writes_enabled)
+    }
+
+    #[test]
+    fn allow_writes_accepts_an_explicit_list_in_any_case() {
+        for on in ["true", "TRUE", "True", "1", "yes", "YES"] {
+            assert!(writes(on).unwrap(), "{on}");
+        }
+        for off in ["false", "FALSE", "0", "no", "No"] {
+            assert!(!writes(off).unwrap(), "{off}");
+        }
+        assert!(
+            !config(&[("RIGOL_HOST", "127.0.0.1")])
+                .unwrap()
+                .writes_enabled
+        );
+    }
+
+    /// `on` or a typo must not quietly mean off: the operator meant
+    /// something, and a startup error naming the variable says what.
+    #[test]
+    fn allow_writes_refuses_anything_else_at_startup() {
+        for bad in ["on", "off", "enabled", "t", ""] {
+            let err = writes(bad).expect_err(bad);
+            assert!(err.to_string().contains("RIGOL_ALLOW_WRITES"), "{err}");
+        }
+    }
+
+    /// Only an unset variable means unset; one that is not UTF-8 is an error.
+    #[test]
+    fn a_variable_that_is_not_utf8_stops_startup() {
+        let lookup = |key: &str| match key {
+            "RIGOL_HOST" => Ok("127.0.0.1".to_string()),
+            "RIGOL_ALLOW_WRITES" => Err(VarError::NotUnicode(std::ffi::OsString::from("x"))),
+            _ => Err(VarError::NotPresent),
+        };
+        let err = RigolServer::from_lookup(lookup)
+            .err()
+            .expect("a non-UTF-8 value was treated as unset");
+        assert!(err.to_string().contains("RIGOL_ALLOW_WRITES"), "{err}");
     }
 
     fn sorted_tools(router: &ToolRouter<RigolServer>) -> Vec<rmcp::model::Tool> {
