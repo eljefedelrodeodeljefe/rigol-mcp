@@ -305,9 +305,15 @@ impl Dp800 {
 
     /// Energises a channel. Logged at info level — every energisation leaves a
     /// trace, because this one moves real power into real hardware.
+    ///
+    /// The setpoints are checked against the ceilings first. They need not
+    /// have come through [`Dp800::set_voltage`]: the front panel, or anything
+    /// that ran before this process, can leave one above the ceiling.
     pub async fn output_on(&self, channel: u8) -> Result<()> {
         validate(channel)?;
         let before = self.channel(channel).await?;
+        self.limits.check_voltage(channel, before.setpoint.volts)?;
+        self.limits.check_current(channel, before.setpoint.amps)?;
         tracing::info!(
             channel,
             volts = before.setpoint.volts,

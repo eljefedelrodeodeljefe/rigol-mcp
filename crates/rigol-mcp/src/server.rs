@@ -352,7 +352,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "ENERGISE a channel — turns the output on at its current setpoints (:OUTPut CHn,ON). Check get_channel first: this delivers real power to whatever is connected"
+        description = "ENERGISE a channel — turns the output on at its current setpoints (:OUTPut CHn,ON). Refused if either setpoint is above the channel's safety ceiling, wherever it was set. Check get_channel first: this delivers real power to whatever is connected"
     )]
     async fn output_on(
         &self,
