@@ -7,6 +7,10 @@
 //! are part of what a test can observe. A command that does not match the
 //! next step is recorded as a failure and gets no reply, and
 //! [`Fake::finish`] fails the test if any step was missed or mismatched.
+//!
+//! Where the order of commands is not fixed, as with concurrent callers,
+//! [`Fake::start_with`] answers each command from a function instead, which
+//! can model the instrument's state.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -61,9 +65,13 @@ pub fn step(expect: &str, reply: Reply) -> Step {
     }
 }
 
+/// Answers one command, or `None` for one the instrument would not know.
+pub type Handler = Box<dyn FnMut(&str) -> Option<Reply> + Send>;
+
 #[derive(Default)]
 struct State {
     script: VecDeque<Step>,
+    handler: Option<Handler>,
     failures: Vec<String>,
     connections: usize,
 }
@@ -75,12 +83,27 @@ pub struct Fake {
 
 impl Fake {
     pub async fn start(script: Vec<Step>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        let state = Arc::new(Mutex::new(State {
+        Self::serve(State {
             script: script.into(),
             ..State::default()
-        }));
+        })
+        .await
+    }
+
+    /// Answers every command with `handler` instead of a script. A `None`
+    /// from it is recorded as a failure and gets no reply.
+    pub async fn start_with(handler: impl FnMut(&str) -> Option<Reply> + Send + 'static) -> Self {
+        Self::serve(State {
+            handler: Some(Box::new(handler)),
+            ..State::default()
+        })
+        .await
+    }
+
+    async fn serve(state: State) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let state = Arc::new(Mutex::new(state));
 
         let shared = state.clone();
         tokio::spawn(async move {
@@ -101,23 +124,9 @@ impl Fake {
                         while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = pending.drain(..=pos).collect();
                             let cmd = String::from_utf8_lossy(&line).trim_end().to_string();
-                            let next = {
-                                let mut st = shared.lock().unwrap();
-                                match st.script.front() {
-                                    Some(s) if s.expect == cmd => st.script.pop_front(),
-                                    Some(s) => {
-                                        let msg = format!("expected `{}`, got `{cmd}`", s.expect);
-                                        st.failures.push(msg);
-                                        None
-                                    }
-                                    None => {
-                                        st.failures.push(format!("unscripted command `{cmd}`"));
-                                        None
-                                    }
-                                }
-                            };
-                            if let Some(step) = next {
-                                respond(&mut write, step.reply).await;
+                            let next = shared.lock().unwrap().next_reply(&cmd);
+                            if let Some(reply) = next {
+                                respond(&mut write, reply).await;
                             }
                         }
                     }
@@ -147,6 +156,30 @@ impl Fake {
         );
         let left: Vec<_> = st.script.iter().map(|s| s.expect.clone()).collect();
         assert!(left.is_empty(), "steps never reached: {left:?}");
+    }
+}
+
+impl State {
+    fn next_reply(&mut self, cmd: &str) -> Option<Reply> {
+        if let Some(handler) = self.handler.as_mut() {
+            let reply = handler(cmd);
+            if reply.is_none() {
+                self.failures.push(format!("unhandled command `{cmd}`"));
+            }
+            return reply;
+        }
+        match self.script.front() {
+            Some(s) if s.expect == cmd => self.script.pop_front().map(|s| s.reply),
+            Some(s) => {
+                let msg = format!("expected `{}`, got `{cmd}`", s.expect);
+                self.failures.push(msg);
+                None
+            }
+            None => {
+                self.failures.push(format!("unscripted command `{cmd}`"));
+                None
+            }
+        }
     }
 }
 

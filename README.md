@@ -43,9 +43,10 @@ design follows from that:
    10 Vpp / 5 V peak on a scope.
 3. **Configuring and energising are separate operations.** Setting a voltage never turns a
    PSU output on; configuring the generator never turns its output on. Every energisation is
-   explicit and logged, and the generator re-checks its settings at output-on, in case they
-   were changed on the front panel. When the generator output is already on, settings change
-   in an order that keeps every intermediate state inside the ceilings too.
+   explicit and logged, and both the PSU and the generator re-check their settings at
+   output-on, in case they were changed on the front panel. When the generator output is
+   already on, settings change in an order that keeps every intermediate state inside the
+   ceilings too.
 
 A refused value comes back as an MCP *invalid params* error. That code tells the model to
 change the arguments, so it lowers the value instead of retrying the same call.
@@ -164,9 +165,10 @@ Every tool's description names the SCPI command it sends, in Programming Guide t
 | `RIGOL_FAMILY` | `dp800` | `dp800` or `dho900`; checked against `*IDN?` on connect |
 | `RIGOL_PORT` | `5555` | Raw SCPI socket |
 | `RIGOL_TIMEOUT_MS` | `5000` | Read timeout |
-| `RIGOL_ALLOW_WRITES` | `false` | Must be `true` for any mutating tool |
-| `RIGOL_CH<n>_MAX_VOLTS` / `_MAX_AMPS` | channel rating | PSU ceiling, `n` = 1–3, set together |
+| `RIGOL_ALLOW_WRITES` | `false` | `true`, `1` or `yes` (any case) enables mutating tools; a value outside true/false, 1/0, yes/no stops startup |
+| `RIGOL_CH<n>_MAX_VOLTS` / `_MAX_AMPS` | channel rating | PSU ceiling, `n` = 1–3, set together; finite and above 0 |
 | `RIGOL_GEN_MAX_VPP` / `RIGOL_GEN_MAX_PEAK_VOLTS` | 10 / 5 | Scope generator ceilings, set together |
+| `RUST_LOG` | `info` | Log filter for stderr; every write and energisation logs at info |
 
 ## The `rigol` library
 
@@ -175,6 +177,10 @@ the safety ceilings, and a `Session` that frames SCPI over a raw TCP socket (one
 flight, binary block reads, reconnect after a failed exchange so a late reply can never be
 paired with the next query). Enable its `schemars` feature for JSON Schema on the parameter
 enums.
+
+The device models keep their session private and the ceilings are built only through
+validating constructors, so code that drives an instrument through `Dp800` or `Dho900` cannot
+go around them. A `Session` you open yourself checks nothing.
 
 ```sh
 cargo run -p rigol --example probe -- 192.0.2.20

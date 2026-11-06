@@ -82,6 +82,33 @@ async fn a_late_reply_is_never_paired_with_the_next_query() {
     fake.finish();
 }
 
+/// A caller can drop a query between its write and its read: an outer
+/// timeout, a cancelled request. The reply still arrives, so the session
+/// must treat that like a failed exchange and reconnect.
+#[tokio::test]
+async fn a_query_dropped_mid_exchange_poisons_the_session() {
+    let fake = Fake::start(vec![
+        step(
+            ":MEAS:VOLT? CH1",
+            Reply::LateLine(Duration::from_millis(200), "LATE".into()),
+        ),
+        step(":MEAS:CURR? CH1", Reply::line("0.250")),
+    ])
+    .await;
+    let s = Session::connect(fake.addr(), cfg(1000)).await.unwrap();
+
+    let dropped = tokio::time::timeout(Duration::from_millis(50), s.query(":MEAS:VOLT? CH1")).await;
+    assert!(dropped.is_err(), "the query should still have been waiting");
+
+    // Let the late reply land in the old socket's buffer before asking again.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let second = s.query(":MEAS:CURR? CH1").await.unwrap();
+
+    assert_eq!(second, "0.250");
+    assert_eq!(fake.connections(), 2, "the socket should be replaced");
+    fake.finish();
+}
+
 #[tokio::test]
 async fn a_healthy_session_keeps_its_connection() {
     let fake = Fake::start(vec![

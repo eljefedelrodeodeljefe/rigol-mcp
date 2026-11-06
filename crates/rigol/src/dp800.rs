@@ -5,6 +5,7 @@
 //! the firmware-quirks section of the README.
 
 use serde::Serialize;
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::idn::Family;
@@ -13,15 +14,46 @@ use crate::limits::Limits;
 use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 
 /// What a channel is physically capable of, e.g. 30 V / 3 A.
+///
+/// Also the shape of a safety ceiling, so both values are finite and above
+/// zero: a NaN ceiling compares false against every request and would allow
+/// all of them. The fields are private so a struct literal cannot skip
+/// [`Rating::new`]:
+///
+/// ```compile_fail
+/// let unlimited = rigol::Rating { volts: f64::NAN, amps: f64::NAN };
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Rating {
-    pub volts: f64,
-    pub amps: f64,
+    volts: f64,
+    amps: f64,
 }
 
 impl Rating {
-    pub fn new(volts: f64, amps: f64) -> Self {
-        Self { volts, amps }
+    pub fn new(volts: f64, amps: f64) -> Result<Self> {
+        positive("voltage rating or ceiling (V)", volts)?;
+        positive("current rating or ceiling (A)", amps)?;
+        Ok(Self { volts, amps })
+    }
+
+    pub fn volts(&self) -> f64 {
+        self.volts
+    }
+
+    pub fn amps(&self) -> f64 {
+        self.amps
+    }
+}
+
+fn positive(what: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::OutOfRange {
+            what,
+            value,
+            allowed: "a finite number above 0".into(),
+        })
     }
 }
 
@@ -66,12 +98,16 @@ impl Channel {
         let (_, rating) = head.split_once(':').ok_or_else(fail)?;
         let (v, a) = rating.split_once('/').ok_or_else(fail)?;
 
+        // The rating backfills the safety ceiling, so it is validated like one.
+        let rating = Rating::new(
+            strip_unit(v).ok_or_else(fail)?,
+            strip_unit(a).ok_or_else(fail)?,
+        )
+        .map_err(|_| fail())?;
+
         Ok(Self {
             channel,
-            rating: Rating {
-                volts: strip_unit(v).ok_or_else(fail)?,
-                amps: strip_unit(a).ok_or_else(fail)?,
-            },
+            rating,
             setpoint: Setpoint { volts, amps },
         })
     }
@@ -156,10 +192,23 @@ pub struct LanConfig {
     pub supported_queries: Vec<String>,
 }
 
+/// A DP800-series power supply. Every write goes through the ceilings in
+/// [`Limits`]; the SCPI session underneath is not handed out, because a raw
+/// command would go around them:
+///
+/// ```compile_fail
+/// async fn bypass(psu: &rigol::Dp800) {
+///     psu.session().command(":SOUR1:VOLT 30").await.unwrap();
+/// }
+/// ```
 pub struct Dp800 {
     session: Session,
     limits: Limits,
     identity: Identity,
+    /// Held across every write, from its check to its last command, so a
+    /// check and the write it permits are never split by another caller's
+    /// write. The session serialises single commands only.
+    operation: Mutex<()>,
 }
 
 impl Dp800 {
@@ -208,6 +257,7 @@ impl Dp800 {
             session,
             limits,
             identity,
+            operation: Mutex::new(()),
         })
     }
 
@@ -217,10 +267,6 @@ impl Dp800 {
 
     pub fn limits(&self) -> &Limits {
         &self.limits
-    }
-
-    pub fn session(&self) -> &Session {
-        &self.session
     }
 
     async fn read_channel(session: &Session, channel: u8) -> Result<Channel> {
@@ -267,7 +313,9 @@ impl Dp800 {
 
     pub async fn set_voltage(&self, channel: u8, volts: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
+        tracing::info!(op = "set_voltage", channel, volts, "setting voltage");
         self.session
             .command(&format!(":SOUR{channel}:VOLT {volts}"))
             .await
@@ -275,7 +323,9 @@ impl Dp800 {
 
     pub async fn set_current(&self, channel: u8, amps: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
+        tracing::info!(op = "set_current", channel, amps, "setting current limit");
         self.session
             .command(&format!(":SOUR{channel}:CURR {amps}"))
             .await
@@ -283,10 +333,18 @@ impl Dp800 {
 
     /// Energises a channel. Logged at info level — every energisation leaves a
     /// trace, because this one moves real power into real hardware.
+    ///
+    /// The setpoints are checked against the ceilings first. They need not
+    /// have come through [`Dp800::set_voltage`]: the front panel, or anything
+    /// that ran before this process, can leave one above the ceiling.
     pub async fn output_on(&self, channel: u8) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         let before = self.channel(channel).await?;
+        self.limits.check_voltage(channel, before.setpoint.volts)?;
+        self.limits.check_current(channel, before.setpoint.amps)?;
         tracing::info!(
+            op = "output_on",
             channel,
             volts = before.setpoint.volts,
             amps = before.setpoint.amps,
@@ -297,7 +355,8 @@ impl Dp800 {
 
     pub async fn output_off(&self, channel: u8) -> Result<()> {
         validate(channel)?;
-        tracing::info!(channel, "de-energising output");
+        let _operation = self.operation.lock().await;
+        tracing::info!(op = "output_off", channel, "de-energising output");
         self.session
             .command(&format!(":OUTP CH{channel},OFF"))
             .await
@@ -305,7 +364,14 @@ impl Dp800 {
 
     pub async fn set_ovp(&self, channel: u8, volts: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_voltage(channel, volts)?;
+        tracing::info!(
+            op = "set_ovp",
+            channel,
+            volts,
+            "setting over-voltage protection"
+        );
         self.session
             .command(&format!(":OUTP:OVP:VAL CH{channel},{volts}"))
             .await
@@ -313,7 +379,14 @@ impl Dp800 {
 
     pub async fn set_ocp(&self, channel: u8, amps: f64) -> Result<()> {
         validate(channel)?;
+        let _operation = self.operation.lock().await;
         self.limits.check_current(channel, amps)?;
+        tracing::info!(
+            op = "set_ocp",
+            channel,
+            amps,
+            "setting over-current protection"
+        );
         self.session
             .command(&format!(":OUTP:OCP:VAL CH{channel},{amps}"))
             .await
@@ -346,7 +419,9 @@ impl Dp800 {
         let manual_ip = self.probe(":SYST:COMM:LAN:MAN?", &mut supported).await;
 
         // Undocumented headers land in the error queue; do not leave ours there.
-        let _ = self.session.clear_status().await;
+        if let Err(e) = self.session.clear_status().await {
+            tracing::warn!(error = %e, "could not clear the error queue after the LAN probe");
+        }
 
         Ok(LanConfig {
             mac: mac.as_deref().map(normalise_mac),
@@ -444,7 +519,7 @@ mod tests {
     #[test]
     fn parses_rating_and_setpoint_from_one_reply() {
         let c = Channel::parse(1, "CH1:30V/3A,0.000,3.000").unwrap();
-        assert_eq!(c.rating, Rating::new(30.0, 3.0));
+        assert_eq!(c.rating, Rating::new(30.0, 3.0).unwrap());
         assert_eq!(c.setpoint.volts, 0.0);
         assert_eq!(c.setpoint.amps, 3.0);
     }
@@ -452,13 +527,21 @@ mod tests {
     #[test]
     fn parses_the_five_volt_channel() {
         let c = Channel::parse(3, "CH3:5V/3A,0.000,3.000").unwrap();
-        assert_eq!(c.rating, Rating::new(5.0, 3.0));
+        assert_eq!(c.rating, Rating::new(5.0, 3.0).unwrap());
     }
 
     #[test]
     fn parses_a_measurement_triple() {
         let m = Measurement::parse(2, "0.0000,0.0000,0.000").unwrap();
         assert_eq!((m.volts, m.amps, m.watts), (0.0, 0.0, 0.0));
+    }
+
+    /// A rating backfills the ceiling, so one that cannot be a ceiling is a
+    /// parse failure, and the channel stays without one.
+    #[test]
+    fn a_zero_or_negative_rating_is_refused() {
+        assert!(Channel::parse(1, "CH1:0V/3A,0.000,3.000").is_err());
+        assert!(Channel::parse(1, "CH1:30V/-3A,0.000,3.000").is_err());
     }
 
     #[test]

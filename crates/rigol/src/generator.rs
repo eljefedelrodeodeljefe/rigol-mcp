@@ -83,12 +83,23 @@ impl Waveshape {
 }
 
 /// Ceilings on what the generator may put on its output.
+///
+/// Built only through [`GeneratorLimits::new`], which validates, or
+/// [`Default`], the hardware range. The fields are private so a struct
+/// literal cannot skip the validation:
+///
+/// ```compile_fail
+/// let unlimited = rigol::GeneratorLimits {
+///     max_vpp: f64::INFINITY,
+///     max_peak_volts: f64::INFINITY,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct GeneratorLimits {
-    pub max_vpp: f64,
+    max_vpp: f64,
     /// Largest `|offset| + amplitude / 2` (the signal's furthest excursion
     /// from 0 V).
-    pub max_peak_volts: f64,
+    max_peak_volts: f64,
 }
 
 impl Default for GeneratorLimits {
@@ -131,8 +142,32 @@ impl GeneratorLimits {
         })
     }
 
-    /// Refuses a combination whose amplitude or peak is over a ceiling.
+    /// Largest amplitude allowed, in Vpp.
+    pub fn max_vpp(&self) -> f64 {
+        self.max_vpp
+    }
+
+    /// Largest `|offset| + amplitude / 2` allowed, in volts.
+    pub fn max_peak_volts(&self) -> f64 {
+        self.max_peak_volts
+    }
+
+    /// Refuses a combination whose amplitude or peak is over a ceiling, or
+    /// that is not finite (`NaN > ceiling` is false, so a plain comparison
+    /// would pass it).
     pub fn check(&self, s: &Signal) -> Result<()> {
+        for (what, v) in [
+            ("generator amplitude (Vpp)", s.amplitude_vpp),
+            ("generator offset (V)", s.offset_volts),
+        ] {
+            if !v.is_finite() {
+                return Err(Error::OutOfRange {
+                    what,
+                    value: v,
+                    allowed: "a finite number".into(),
+                });
+            }
+        }
         if s.shape != Waveshape::Dc && s.amplitude_vpp > self.max_vpp {
             return Err(Error::GeneratorLimit {
                 what: "amplitude",
@@ -344,10 +379,20 @@ mod tests {
         assert!(limits.check(&sine(3.0, 1.5)).is_ok());
     }
 
+    /// A reading that parsed as NaN compares false against every ceiling;
+    /// output-on checks readings, so the check must refuse it outright.
+    #[test]
+    fn a_non_finite_signal_is_refused() {
+        let limits = GeneratorLimits::default();
+        assert!(limits.check(&sine(f64::NAN, 0.0)).is_err());
+        assert!(limits.check(&sine(1.0, f64::NAN)).is_err());
+        assert!(limits.check(&sine(1.0, f64::INFINITY)).is_err());
+    }
+
     #[test]
     fn defaults_are_the_hardware_range_never_unlimited() {
         let d = GeneratorLimits::default();
-        assert_eq!((d.max_vpp, d.max_peak_volts), (10.0, 5.0));
+        assert_eq!((d.max_vpp(), d.max_peak_volts()), (10.0, 5.0));
         assert!(GeneratorLimits::new(12.0, 3.0).is_err());
         assert!(GeneratorLimits::new(3.0, f64::INFINITY).is_err());
         assert!(GeneratorLimits::new(0.0, 1.0).is_err());

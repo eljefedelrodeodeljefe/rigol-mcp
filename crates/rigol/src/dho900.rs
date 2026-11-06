@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape, plan};
@@ -595,11 +596,25 @@ impl Waveform {
     }
 }
 
+/// A DHO800/DHO900-series oscilloscope. Signal-generator writes go through
+/// the ceilings in [`GeneratorLimits`]; the SCPI session underneath is not
+/// handed out, because a raw command would go around them:
+///
+/// ```compile_fail
+/// async fn bypass(scope: &rigol::Dho900) {
+///     scope.session().command(":SOURce:VOLTage:AMPLitude 10").await.unwrap();
+/// }
+/// ```
 pub struct Dho900 {
     session: Session,
     identity: Identity,
     channels: u8,
     generator_limits: GeneratorLimits,
+    /// Held across each generator read-plan-write sequence. The session
+    /// serialises single commands only: two configure calls that both read
+    /// the state before either writes can each pass the ceilings and still
+    /// exceed them together.
+    operation: Mutex<()>,
 }
 
 impl Dho900 {
@@ -634,6 +649,7 @@ impl Dho900 {
             identity,
             channels,
             generator_limits: GeneratorLimits::default(),
+            operation: Mutex::new(()),
         })
     }
 
@@ -654,11 +670,6 @@ impl Dho900 {
     /// Analog channels on this model.
     pub fn channel_count(&self) -> u8 {
         self.channels
-    }
-
-    /// The raw session, for diagnostics.
-    pub fn session(&self) -> &Session {
-        &self.session
     }
 
     pub async fn errors(&self) -> Result<Vec<InstrumentError>> {
@@ -1121,10 +1132,20 @@ impl Dho900 {
         &self,
         cfg: &GeneratorConfig,
     ) -> Result<Applied<GeneratorState>> {
+        let _operation = self.operation.lock().await;
         let current = self.current_signal().await?;
         let target = cfg.apply_to(&current);
         let changes = plan(&current, &target, &self.generator_limits)?;
 
+        tracing::info!(
+            op = "configure_generator",
+            shape = ?target.shape,
+            frequency_hz = target.frequency_hz,
+            amplitude_vpp = target.amplitude_vpp,
+            offset_volts = target.offset_volts,
+            peak_volts = target.peak_volts(),
+            "configuring signal generator"
+        );
         self.session.clear_status().await?;
         for change in &changes {
             self.session.command(&change.scpi()).await?;
@@ -1138,24 +1159,28 @@ impl Dho900 {
     /// Turns the output on, after checking the settings it would put out.
     /// They may have changed on the front panel since they were configured.
     pub async fn generator_output_on(&self) -> Result<GeneratorState> {
+        let _operation = self.operation.lock().await;
         let current = self.current_signal().await?;
         self.generator_limits.check(&current)?;
-        self.session.command(":SOURce:OUTPut:STATe ON").await?;
-        let state = self.generator().await?;
+        // Logged before the command, so an energisation whose read-back
+        // fails still leaves its line.
         tracing::info!(
-            shape = ?state.shape,
-            frequency_hz = state.frequency_hz,
-            amplitude_vpp = state.amplitude_vpp,
-            offset_volts = state.offset_volts,
-            peak_volts = ?state.peak_volts,
+            op = "generator_output_on",
+            shape = ?current.shape,
+            frequency_hz = current.frequency_hz,
+            amplitude_vpp = current.amplitude_vpp,
+            offset_volts = current.offset_volts,
+            peak_volts = current.peak_volts(),
             "signal generator output ON"
         );
-        Ok(state)
+        self.session.command(":SOURce:OUTPut:STATe ON").await?;
+        self.generator().await
     }
 
     pub async fn generator_output_off(&self) -> Result<GeneratorState> {
+        let _operation = self.operation.lock().await;
+        tracing::info!(op = "generator_output_off", "signal generator output off");
         self.session.command(":SOURce:OUTPut:STATe OFF").await?;
-        tracing::info!("signal generator output off");
         self.generator().await
     }
 
