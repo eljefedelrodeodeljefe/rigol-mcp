@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.4.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.3.1...v0.4.0) (2026-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* Dp800::session() and Dho900::session() are removed. GeneratorLimits and Rating fields are private; read them with max_vpp()/max_peak_volts() and volts()/amps().
+* rigol::Rating::new now returns Result<Rating>.
+
+### Bug Fixes
+
+* close the library paths around the safety ceilings ([ffae194](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/ffae1944ba8c6ad0bb2d8531c26768b66847d62e))
+* hold an operation lock across generator and PSU write sequences ([92f2efc](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/92f2efc9652c908b4f6d7ee0af78d2666de4f515))
+* log discarded results instead of dropping them silently ([0ce0faf](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/0ce0faf3a626b26792688969ccc6a86f1c59f0a5))
+* log one info line for every instrument write ([d82b00d](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/d82b00deff6cd02dba938e298bf0d32f1bfcf044))
+* **mcp:** log at info unless RUST_LOG says otherwise ([e0c43a9](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/e0c43a9107000f1554b1a30f23c1c843d1459b79))
+* **mcp:** parse boolean environment variables strictly ([9c39b1d](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/9c39b1d15d2cb4f8c1b163e9b0272935229bade7))
+* re-check PSU setpoints against the ceilings before energising ([280f8f1](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/280f8f13a73caa8b6d8bd43ab71d265ba6860293))
+* refuse non-finite and non-positive safety ceilings ([f3deb94](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/f3deb94639cf4fec87d000c25fedd6207a673528))
+* **scpi:** poison a session whose exchange is dropped mid-way ([4aeb29b](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/4aeb29b0b743620175a7da3dead17fc55743acc2))
+
+
+### Refactors
+
+* **mcp:** read configuration through a lookup function ([2fe95c5](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/2fe95c50587d9ce2e22671c71b886592d45de449))
+
+
+### Documentation
+
+* **agents:** lint escapes via #[expect], and the new safety rules ([e3a4ecb](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/e3a4ecb1f42c45875446f0a51d54cff82a825c3d))
+* **readme:** the PSU re-checks its setpoints at output-on too ([161efcf](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/161efcf01de345ffedd9a31e85f8e86253674132))
+* sweep README and AGENTS prose against the de-AI style rules ([91c9e8e](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/91c9e8eb234cd83e18776331ced0b72ccaa67a20))
+* sweep README and AGENTS prose against the de-AI style rules ([a3164cb](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/a3164cb6d81b1076ef807a39e827eb8580fb6aee))
+
 ## [0.3.1](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.3.0...v0.3.1) (2026-11-06)
 
 
