@@ -8,6 +8,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde_json::Value;
+use std::env::VarError;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
@@ -39,34 +40,42 @@ pub struct RigolServer {
 
 impl RigolServer {
     pub fn from_env() -> anyhow::Result<Self> {
-        let host = std::env::var("RIGOL_HOST").context("RIGOL_HOST not set")?;
+        Self::from_lookup(|key| std::env::var(key))
+    }
+
+    /// Builds the server from configuration read through `lookup`, so tests
+    /// can supply it without touching the process environment.
+    fn from_lookup(lookup: impl Fn(&str) -> Result<String, VarError>) -> anyhow::Result<Self> {
+        let var = |key: &str| env_var(key, lookup(key));
+        let host = var("RIGOL_HOST")?.context("RIGOL_HOST not set")?;
         // Defaults to dp800 so configurations written before scope support
         // keep meaning what they meant.
-        let family: Family = match std::env::var("RIGOL_FAMILY") {
-            Ok(f) => f.parse().map_err(anyhow::Error::msg)?,
-            Err(_) => Family::Dp800,
+        let family: Family = match var("RIGOL_FAMILY")? {
+            Some(f) => f.parse().map_err(anyhow::Error::msg)?,
+            None => Family::Dp800,
         };
-        let port = match std::env::var("RIGOL_PORT") {
-            Ok(p) => Some(
+        let port = match var("RIGOL_PORT")? {
+            Some(p) => Some(
                 p.parse()
                     .context("RIGOL_PORT must be a valid port number")?,
             ),
-            Err(_) => None,
+            None => None,
         };
-        let timeout_ms: u64 = std::env::var("RIGOL_TIMEOUT_MS")
-            .unwrap_or_else(|_| "5000".into())
+        let timeout_ms: u64 = var("RIGOL_TIMEOUT_MS")?
+            .unwrap_or_else(|| "5000".into())
             .parse()
             .context("RIGOL_TIMEOUT_MS must be a whole number of milliseconds")?;
-        let writes_enabled = std::env::var("RIGOL_ALLOW_WRITES")
+        let writes_enabled = var("RIGOL_ALLOW_WRITES")?
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
             .unwrap_or(false);
+        let f64_var = |key: &str| env_f64(key, var(key)?);
 
         // Explicit ceilings override the channel's rating. Anything not set here
         // is backfilled from the instrument's own rating at connect time.
         let mut configured_limits = Limits::new();
         for ch in 1..=3u8 {
-            let volts = env_f64(&format!("RIGOL_CH{ch}_MAX_VOLTS"))?;
-            let amps = env_f64(&format!("RIGOL_CH{ch}_MAX_AMPS"))?;
+            let volts = f64_var(&format!("RIGOL_CH{ch}_MAX_VOLTS"))?;
+            let amps = f64_var(&format!("RIGOL_CH{ch}_MAX_AMPS"))?;
             if let (Some(v), Some(a)) = (volts, amps) {
                 configured_limits = configured_limits.with_channel(ch, v, a)?;
             } else if volts.is_some() || amps.is_some() {
@@ -77,8 +86,8 @@ impl RigolServer {
         }
 
         let generator_limits = match (
-            env_f64("RIGOL_GEN_MAX_VPP")?,
-            env_f64("RIGOL_GEN_MAX_PEAK_VOLTS")?,
+            f64_var("RIGOL_GEN_MAX_VPP")?,
+            f64_var("RIGOL_GEN_MAX_PEAK_VOLTS")?,
         ) {
             (Some(vpp), Some(peak)) => GeneratorLimits::new(vpp, peak)?,
             (None, None) => GeneratorLimits::default(),
@@ -175,14 +184,18 @@ impl RigolServer {
     }
 }
 
-fn env_f64(key: &str) -> anyhow::Result<Option<f64>> {
-    match std::env::var(key) {
-        Ok(v) => Ok(Some(
+/// A variable's value, or `None` if it cannot be read.
+fn env_var(_key: &str, value: Result<String, VarError>) -> anyhow::Result<Option<String>> {
+    Ok(value.ok())
+}
+
+fn env_f64(key: &str, value: Option<String>) -> anyhow::Result<Option<f64>> {
+    value
+        .map(|v| {
             v.parse()
-                .with_context(|| format!("{key} must be a number"))?,
-        )),
-        Err(_) => Ok(None),
-    }
+                .with_context(|| format!("{key} must be a number"))
+        })
+        .transpose()
 }
 
 #[tool_router(router = psu_router)]
