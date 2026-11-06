@@ -27,9 +27,10 @@ impl Limits {
     }
 
     /// Sets an explicit ceiling for one channel, overriding its rating.
+    /// Both values must be finite and above zero.
     pub fn with_channel(mut self, channel: u8, volts: f64, amps: f64) -> Result<Self> {
         let idx = index_of(channel)?;
-        self.per_channel[idx] = Some(Rating { volts, amps });
+        self.per_channel[idx] = Some(Rating::new(volts, amps)?);
         Ok(self)
     }
 
@@ -55,8 +56,11 @@ impl Limits {
             .ok_or(Error::NoSuchChannel(channel))
     }
 
+    /// Refuses a voltage above the channel's ceiling, or one that is not a
+    /// finite number (`NaN > ceiling` is false, so it needs its own check).
     pub fn check_voltage(&self, channel: u8, requested: f64) -> Result<()> {
         let ceiling = self.ceiling(channel)?;
+        finite("voltage (V)", requested)?;
         if requested > ceiling.volts {
             return Err(Error::LimitExceeded {
                 what: "voltage",
@@ -69,8 +73,11 @@ impl Limits {
         Ok(())
     }
 
+    /// Refuses a current above the channel's ceiling, or one that is not a
+    /// finite number.
     pub fn check_current(&self, channel: u8, requested: f64) -> Result<()> {
         let ceiling = self.ceiling(channel)?;
+        finite("current (A)", requested)?;
         if requested > ceiling.amps {
             return Err(Error::LimitExceeded {
                 what: "current",
@@ -81,6 +88,18 @@ impl Limits {
             });
         }
         Ok(())
+    }
+}
+
+fn finite(what: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(Error::OutOfRange {
+            what,
+            value,
+            allowed: "a finite number".into(),
+        })
     }
 }
 
@@ -98,9 +117,9 @@ mod tests {
     fn limits() -> Limits {
         let mut l = Limits::new();
         l.backfill_from_ratings(&[
-            (1, Rating::new(30.0, 3.0)),
-            (2, Rating::new(30.0, 3.0)),
-            (3, Rating::new(5.0, 3.0)),
+            (1, Rating::new(30.0, 3.0).unwrap()),
+            (2, Rating::new(30.0, 3.0).unwrap()),
+            (3, Rating::new(5.0, 3.0).unwrap()),
         ]);
         l
     }
@@ -119,7 +138,7 @@ mod tests {
     #[test]
     fn an_explicit_ceiling_wins_over_the_rating() {
         let mut l = Limits::new().with_channel(1, 3.6, 0.5).unwrap();
-        l.backfill_from_ratings(&[(1, Rating::new(30.0, 3.0))]);
+        l.backfill_from_ratings(&[(1, Rating::new(30.0, 3.0).unwrap())]);
         assert!(l.check_voltage(1, 5.0).is_err(), "3.6 V ceiling must hold");
         assert!(l.check_voltage(1, 3.3).is_ok());
     }
@@ -128,6 +147,30 @@ mod tests {
     fn an_unconfigured_channel_is_not_unlimited() {
         // No backfill, no explicit ceiling: refuse rather than allow.
         assert!(Limits::new().check_voltage(1, 0.1).is_err());
+    }
+
+    #[test]
+    fn a_ceiling_must_be_finite_and_positive() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            assert!(
+                Limits::new().with_channel(1, bad, 0.5).is_err(),
+                "{bad} V accepted as a ceiling"
+            );
+            assert!(
+                Limits::new().with_channel(1, 3.3, bad).is_err(),
+                "{bad} A accepted as a ceiling"
+            );
+        }
+    }
+
+    /// `NaN > ceiling` is false, so a NaN request would pass a plain
+    /// comparison.
+    #[test]
+    fn a_non_finite_request_is_refused() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(limits().check_voltage(1, bad).is_err(), "{bad} V passed");
+            assert!(limits().check_current(1, bad).is_err(), "{bad} A passed");
+        }
     }
 
     #[test]

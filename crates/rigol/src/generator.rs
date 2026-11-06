@@ -131,8 +131,22 @@ impl GeneratorLimits {
         })
     }
 
-    /// Refuses a combination whose amplitude or peak is over a ceiling.
+    /// Refuses a combination whose amplitude or peak is over a ceiling, or
+    /// that is not finite (`NaN > ceiling` is false, so a plain comparison
+    /// would pass it).
     pub fn check(&self, s: &Signal) -> Result<()> {
+        for (what, v) in [
+            ("generator amplitude (Vpp)", s.amplitude_vpp),
+            ("generator offset (V)", s.offset_volts),
+        ] {
+            if !v.is_finite() {
+                return Err(Error::OutOfRange {
+                    what,
+                    value: v,
+                    allowed: "a finite number".into(),
+                });
+            }
+        }
         if s.shape != Waveshape::Dc && s.amplitude_vpp > self.max_vpp {
             return Err(Error::GeneratorLimit {
                 what: "amplitude",
@@ -342,6 +356,16 @@ mod tests {
         let err = limits.check(&sine(3.0, 2.0)).unwrap_err();
         assert!(matches!(err, Error::GeneratorLimit { .. }), "{err:?}");
         assert!(limits.check(&sine(3.0, 1.5)).is_ok());
+    }
+
+    /// A reading that parsed as NaN compares false against every ceiling;
+    /// output-on checks readings, so the check must refuse it outright.
+    #[test]
+    fn a_non_finite_signal_is_refused() {
+        let limits = GeneratorLimits::default();
+        assert!(limits.check(&sine(f64::NAN, 0.0)).is_err());
+        assert!(limits.check(&sine(1.0, f64::NAN)).is_err());
+        assert!(limits.check(&sine(1.0, f64::INFINITY)).is_err());
     }
 
     #[test]

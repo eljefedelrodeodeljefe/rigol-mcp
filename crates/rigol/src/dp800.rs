@@ -13,6 +13,10 @@ use crate::limits::Limits;
 use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 
 /// What a channel is physically capable of, e.g. 30 V / 3 A.
+///
+/// Also the shape of a safety ceiling, so both values are finite and above
+/// zero: a NaN ceiling compares false against every request and would allow
+/// all of them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Rating {
     pub volts: f64,
@@ -20,8 +24,22 @@ pub struct Rating {
 }
 
 impl Rating {
-    pub fn new(volts: f64, amps: f64) -> Self {
-        Self { volts, amps }
+    pub fn new(volts: f64, amps: f64) -> Result<Self> {
+        positive("voltage rating or ceiling (V)", volts)?;
+        positive("current rating or ceiling (A)", amps)?;
+        Ok(Self { volts, amps })
+    }
+}
+
+fn positive(what: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::OutOfRange {
+            what,
+            value,
+            allowed: "a finite number above 0".into(),
+        })
     }
 }
 
@@ -66,12 +84,16 @@ impl Channel {
         let (_, rating) = head.split_once(':').ok_or_else(fail)?;
         let (v, a) = rating.split_once('/').ok_or_else(fail)?;
 
+        // The rating backfills the safety ceiling, so it is validated like one.
+        let rating = Rating::new(
+            strip_unit(v).ok_or_else(fail)?,
+            strip_unit(a).ok_or_else(fail)?,
+        )
+        .map_err(|_| fail())?;
+
         Ok(Self {
             channel,
-            rating: Rating {
-                volts: strip_unit(v).ok_or_else(fail)?,
-                amps: strip_unit(a).ok_or_else(fail)?,
-            },
+            rating,
             setpoint: Setpoint { volts, amps },
         })
     }
@@ -444,7 +466,7 @@ mod tests {
     #[test]
     fn parses_rating_and_setpoint_from_one_reply() {
         let c = Channel::parse(1, "CH1:30V/3A,0.000,3.000").unwrap();
-        assert_eq!(c.rating, Rating::new(30.0, 3.0));
+        assert_eq!(c.rating, Rating::new(30.0, 3.0).unwrap());
         assert_eq!(c.setpoint.volts, 0.0);
         assert_eq!(c.setpoint.amps, 3.0);
     }
@@ -452,13 +474,21 @@ mod tests {
     #[test]
     fn parses_the_five_volt_channel() {
         let c = Channel::parse(3, "CH3:5V/3A,0.000,3.000").unwrap();
-        assert_eq!(c.rating, Rating::new(5.0, 3.0));
+        assert_eq!(c.rating, Rating::new(5.0, 3.0).unwrap());
     }
 
     #[test]
     fn parses_a_measurement_triple() {
         let m = Measurement::parse(2, "0.0000,0.0000,0.000").unwrap();
         assert_eq!((m.volts, m.amps, m.watts), (0.0, 0.0, 0.0));
+    }
+
+    /// A rating backfills the ceiling, so one that cannot be a ceiling is a
+    /// parse failure, and the channel stays without one.
+    #[test]
+    fn a_zero_or_negative_rating_is_refused() {
+        assert!(Channel::parse(1, "CH1:0V/3A,0.000,3.000").is_err());
+        assert!(Channel::parse(1, "CH1:30V/-3A,0.000,3.000").is_err());
     }
 
     #[test]

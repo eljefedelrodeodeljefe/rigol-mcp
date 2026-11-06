@@ -77,7 +77,9 @@ impl RigolServer {
             let volts = f64_var(&format!("RIGOL_CH{ch}_MAX_VOLTS"))?;
             let amps = f64_var(&format!("RIGOL_CH{ch}_MAX_AMPS"))?;
             if let (Some(v), Some(a)) = (volts, amps) {
-                configured_limits = configured_limits.with_channel(ch, v, a)?;
+                configured_limits = configured_limits
+                    .with_channel(ch, v, a)
+                    .with_context(|| format!("RIGOL_CH{ch}_MAX_VOLTS / RIGOL_CH{ch}_MAX_AMPS"))?;
             } else if volts.is_some() || amps.is_some() {
                 anyhow::bail!(
                     "RIGOL_CH{ch}_MAX_VOLTS and RIGOL_CH{ch}_MAX_AMPS must be set together"
@@ -89,7 +91,8 @@ impl RigolServer {
             f64_var("RIGOL_GEN_MAX_VPP")?,
             f64_var("RIGOL_GEN_MAX_PEAK_VOLTS")?,
         ) {
-            (Some(vpp), Some(peak)) => GeneratorLimits::new(vpp, peak)?,
+            (Some(vpp), Some(peak)) => GeneratorLimits::new(vpp, peak)
+                .context("RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS")?,
             (None, None) => GeneratorLimits::default(),
             _ => {
                 anyhow::bail!("RIGOL_GEN_MAX_VPP and RIGOL_GEN_MAX_PEAK_VOLTS must be set together")
@@ -189,13 +192,19 @@ fn env_var(_key: &str, value: Result<String, VarError>) -> anyhow::Result<Option
     Ok(value.ok())
 }
 
+/// A ceiling from the environment. `str::parse::<f64>` accepts `NaN` and
+/// `inf`, neither of which is a ceiling, so they are refused here with the
+/// variable's name; the library refuses zero and negatives.
 fn env_f64(key: &str, value: Option<String>) -> anyhow::Result<Option<f64>> {
-    value
-        .map(|v| {
-            v.parse()
-                .with_context(|| format!("{key} must be a number"))
-        })
-        .transpose()
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let n: f64 = v
+        .trim()
+        .parse()
+        .with_context(|| format!("{key} must be a number"))?;
+    anyhow::ensure!(n.is_finite(), "{key} must be a finite number, got {v:?}");
+    Ok(Some(n))
 }
 
 #[tool_router(router = psu_router)]
@@ -700,6 +709,39 @@ const SCOPE_INSTRUCTIONS: &str = concat!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lookup(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Result<String, VarError> {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_string())
+                .ok_or(VarError::NotPresent)
+        }
+    }
+
+    fn config(vars: &'static [(&'static str, &'static str)]) -> anyhow::Result<RigolServer> {
+        RigolServer::from_lookup(lookup(vars))
+    }
+
+    #[test]
+    fn a_ceiling_that_is_not_a_positive_number_stops_startup() {
+        for bad in ["NaN", "inf", "-inf", "0", "-3.3"] {
+            let vars: &'static [_] = Box::leak(Box::new([
+                ("RIGOL_HOST", "127.0.0.1"),
+                ("RIGOL_CH1_MAX_VOLTS", bad),
+                ("RIGOL_CH1_MAX_AMPS", "0.5"),
+            ]));
+            assert!(config(vars).is_err(), "RIGOL_CH1_MAX_VOLTS={bad} accepted");
+        }
+        let good = config(&[
+            ("RIGOL_HOST", "127.0.0.1"),
+            ("RIGOL_CH1_MAX_VOLTS", "3.3"),
+            ("RIGOL_CH1_MAX_AMPS", "0.5"),
+        ]);
+        assert!(good.is_ok(), "{:?}", good.err());
+    }
 
     fn sorted_tools(router: &ToolRouter<RigolServer>) -> Vec<rmcp::model::Tool> {
         let mut tools = router.list_all();
