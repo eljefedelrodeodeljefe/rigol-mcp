@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.3.0...v0.3.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **deps:** upgrade rmcp to 3.9 ([cba8b7b](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/cba8b7b66a922d710b8f5858519183efb0a4df3e))
+* **deps:** upgrade rmcp to 3.9 ([63d4900](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/63d4900fb34033c63789e507625c07ff87295e26))
+
 ## [0.3.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.2.0...v0.3.0) (2026-11-05)
 
 
