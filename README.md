@@ -58,6 +58,14 @@ directly, with or without this server.
 The ceilings likewise constrain *this client only*. The front panel and any other LAN
 client are unaffected, so the ceilings do not replace a hardware interlock.
 
+On a PSU, **instrument-side protection** is the safeguard that does reach the front panel
+and every other client: with OVP or OCP on, the supply itself turns the output off above the
+trip level. It ships **off**, with trip levels above the channel ratings (33 V / 3.3 A on a
+30 V / 3 A DP832A channel). `set_protection` sets the levels, refused above the ceilings
+like any setpoint, and then switches protection on; `get_protection` and `set_protection`
+warn when protection is on but its level is above the ceiling, because it cannot trip before
+a setpoint this server would refuse anyway.
+
 ## Install
 
 **Release binary** (Linux and macOS, x86_64 and aarch64): download from
@@ -128,11 +136,11 @@ PSU too.
 | `get_channel` / `list_channels` | Rating and setpoints (`:APPLy?`) | — |
 | `measure_channel` | Delivered volts, amps, watts (`:MEASure:ALL?`) | — |
 | `get_output_state` | Output on or off (`:OUTPut?`) | — |
-| `get_protection` | OVP/OCP levels and trip state | — |
+| `get_protection` | OVP/OCP on/off, levels and trip state, with the same warnings | — |
 | `get_safety_limits` | Ceilings in force | — |
 | `get_lan_config` / `get_instrument_errors` | LAN subsystem, error queue | — |
 | `set_voltage` / `set_current` | Setpoints, refused above the ceiling | writes |
-| `set_protection` | OVP/OCP trip levels | writes |
+| `set_protection` | OVP/OCP trip levels and on/off; levels first, warns when an armed level is above the ceiling | writes |
 | `output_on` / `output_off` | Energise or de-energise a channel | writes |
 
 ### Oscilloscope (`RIGOL_FAMILY=dho900`)

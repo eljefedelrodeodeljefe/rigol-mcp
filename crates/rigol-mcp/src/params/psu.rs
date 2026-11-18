@@ -35,4 +35,12 @@ pub struct SetProtectionParams {
     pub ovp_volts: Option<f64>,
     #[schemars(description = "Over-current protection trip level in amps (OCP)")]
     pub ocp_amps: Option<f64>,
+    #[schemars(
+        description = "Turn over-voltage protection on or off (:OUTPut:OVP). Applied after any trip level in the same call. When on, the instrument itself turns the output off above the trip level"
+    )]
+    pub ovp_enabled: Option<bool>,
+    #[schemars(
+        description = "Turn over-current protection on or off (:OUTPut:OCP). Applied after any trip level in the same call. When on, the instrument itself turns the output off above the trip level"
+    )]
+    pub ocp_enabled: Option<bool>,
 }

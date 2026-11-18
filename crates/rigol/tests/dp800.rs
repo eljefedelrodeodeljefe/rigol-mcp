@@ -185,3 +185,36 @@ async fn dp800_reads_back_a_changed_setpoint() {
     }
     fake.finish();
 }
+
+/// Protection on/off is the bare `:OUTP:OVP` / `:OUTP:OCP` state command, the
+/// abbreviated form this firmware accepts. The trailing query proves nothing
+/// else was sent in between.
+#[tokio::test]
+async fn protection_on_off_sends_the_state_commands() {
+    let (fake, psu) = connect(vec![
+        step(":OUTP:OVP CH1,ON", Reply::None),
+        step(":OUTP:OCP CH1,ON", Reply::None),
+        step(":OUTP:OVP CH2,OFF", Reply::None),
+        step(":OUTP:OCP CH3,OFF", Reply::None),
+        step(":OUTP? CH1", Reply::line("OFF")),
+    ])
+    .await;
+
+    psu.set_ovp_enabled(1, true).await.expect("ovp on");
+    psu.set_ocp_enabled(1, true).await.expect("ocp on");
+    psu.set_ovp_enabled(2, false).await.expect("ovp off");
+    psu.set_ocp_enabled(3, false).await.expect("ocp off");
+    psu.output_state(1).await.expect("output state");
+    fake.finish();
+}
+
+/// A channel that does not exist is refused before anything is sent.
+#[tokio::test]
+async fn protection_on_off_refuses_a_channel_that_does_not_exist() {
+    let (fake, psu) = connect(vec![step(":OUTP? CH1", Reply::line("OFF"))]).await;
+
+    assert!(psu.set_ovp_enabled(4, true).await.is_err());
+    assert!(psu.set_ocp_enabled(0, true).await.is_err());
+    psu.output_state(1).await.expect("output state");
+    fake.finish();
+}

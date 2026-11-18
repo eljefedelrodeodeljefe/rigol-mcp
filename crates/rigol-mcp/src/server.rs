@@ -356,7 +356,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Set over-voltage (OVP) and/or over-current (OCP) protection trip levels for a channel"
+        description = "Set over-voltage (OVP) and over-current (OCP) protection for a channel: trip levels (:OUTPut:OVP:VALue, :OUTPut:OCP:VALue, refused above the channel's ceiling) and on/off (:OUTPut:OVP, :OUTPut:OCP). Levels are applied before on/off. With protection on, the instrument itself turns the output off above the trip level, whoever set the setpoint. Returns the protection read back, with warnings for protection that is on but trips above the ceiling"
     )]
     async fn set_protection(
         &self,
