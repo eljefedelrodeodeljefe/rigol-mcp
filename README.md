@@ -212,6 +212,11 @@ Guide:
 - **`:APPL? CHn` returns the channel rating *and* its setpoints** in one reply:
   `CH1:30V/3A,0.000,3.000`. That rating is what seeds an unconfigured safety ceiling.
 - **The MAC comes back hyphen-separated** (`00-19-AF-…`); the library normalises it to colons.
+- **A query right after a setpoint change gets `Command error`** (firmware `00.01.21`). Sent
+  within about 30 ms of a command that changed a value, a query is answered with a bare
+  `Command error`: no newline, nothing in the error queue. The command itself is applied. The
+  library waits 100 ms after every DP800 command (`DP800_COMMAND_SETTLE`) before the next
+  exchange, so a write tool's read-back is answered.
 - **The instrument is fragile under scanning.** A full `nmap -p-` sweep wedged it for about
   ninety seconds, during which it answered nothing. Probe sequentially. Nothing in this crate
   sweeps.
