@@ -4,6 +4,8 @@
 //! firmware disagrees with the guide the firmware wins — see [`LanConfig`] and
 //! the firmware-quirks section of the README.
 
+use std::time::Duration;
+
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -192,6 +194,16 @@ pub struct LanConfig {
     pub supported_queries: Vec<String>,
 }
 
+/// How long a DP800 needs after a command before it answers the next query.
+///
+/// Measured on a DP832A, firmware `00.01.21`: a query sent within ~30 ms of a
+/// command that *changes* a setpoint gets a bare `Command error`, with no
+/// newline and nothing in the error queue, instead of its reply. At 30 ms and
+/// above every query was answered; rewriting an unchanged value never failed.
+/// The command itself is applied either way. 100 ms leaves a wide margin and
+/// costs nothing a human would notice.
+pub const DP800_COMMAND_SETTLE: Duration = Duration::from_millis(100);
+
 /// A DP800-series power supply. Every write goes through the ceilings in
 /// [`Limits`]; the SCPI session underneath is not handed out, because a raw
 /// command would go around them:
@@ -221,7 +233,9 @@ impl Dp800 {
         mut limits: Limits,
     ) -> Result<Self> {
         let addr = format!("{host}:{}", port.unwrap_or(DEFAULT_PORT));
-        let session = Session::connect(addr, cfg).await?;
+        let session = Session::connect(addr, cfg)
+            .await?
+            .with_command_settle(DP800_COMMAND_SETTLE);
 
         let raw = session.query("*IDN?").await?;
         let identity = Identity::parse(&raw).ok_or_else(|| Error::Parse {

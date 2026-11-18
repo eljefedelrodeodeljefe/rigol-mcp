@@ -30,7 +30,9 @@ pub use dho900::{
     LogicAnalyzerConfig, MeasureItem, MeasureStatistics, Preamble, Reading, ScopeLan, ScopeStatus,
     Slope, Sweep, Timebase, Waveform, WaveformStats,
 };
-pub use dp800::{Channel, Dp800, LanConfig, Measurement, OutputState, Protection, Rating};
+pub use dp800::{
+    Channel, DP800_COMMAND_SETTLE, Dp800, LanConfig, Measurement, OutputState, Protection, Rating,
+};
 pub use error::{Error, Result};
 pub use generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape};
 pub use idn::{Family, Identity};

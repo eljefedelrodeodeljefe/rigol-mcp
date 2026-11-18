@@ -14,6 +14,11 @@
 //!   session reconnects before its next command. Draining is not an option —
 //!   there is no way to know whether a late reply is still coming. A query
 //!   whose future is dropped between write and read poisons it the same way.
+//! - A command can need time before the next exchange. A DP832A that has just
+//!   changed a setpoint answers a query sent within ~30 ms with a bare
+//!   `Command error` and no newline. [`Session::with_command_settle`] makes the
+//!   session wait after each command; the wait belongs to the instrument, so it
+//!   survives a reconnect.
 //! - Binary replies (screenshots, waveforms) are IEEE 488.2 definite-length
 //!   blocks, `#<n><len><payload>`, read by length and never by line: the
 //!   payload is binary and contains newlines.
@@ -23,6 +28,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 
@@ -80,6 +86,8 @@ impl InstrumentError {
 pub struct Session {
     addr: String,
     cfg: SessionConfig,
+    /// How long the instrument needs after a command before the next exchange.
+    command_settle: Duration,
     conn: Mutex<Conn>,
 }
 
@@ -91,6 +99,8 @@ struct Conn {
     /// A block's trailing newline had not arrived when the block was returned.
     /// The next line read skips it, or it would read as an empty reply.
     pending_terminator: bool,
+    /// No exchange starts before this instant: the last command's settle time.
+    quiet_until: Option<Instant>,
 }
 
 impl Session {
@@ -101,12 +111,29 @@ impl Session {
         Ok(Self {
             addr,
             cfg,
+            command_settle: Duration::ZERO,
             conn: Mutex::new(Conn {
                 io,
                 poisoned: false,
                 pending_terminator: false,
+                quiet_until: None,
             }),
         })
+    }
+
+    /// Waits `settle` after every [`Session::command`] before the next
+    /// exchange of any kind starts. Zero, the default, never waits.
+    ///
+    /// For firmware that is still applying a command when the next one
+    /// arrives and answers it with garbage instead of a reply.
+    #[must_use]
+    pub fn with_command_settle(mut self, settle: Duration) -> Self {
+        self.command_settle = settle;
+        self
+    }
+
+    pub fn command_settle(&self) -> Duration {
+        self.command_settle
     }
 
     pub fn addr(&self) -> &str {
@@ -130,6 +157,10 @@ impl Session {
         tracing::debug!(%cmd, "scpi command");
         conn.begin();
         let result = write_line(&mut conn.io, cmd).await;
+        // Even after a failed write: part of the command may have arrived.
+        if !self.command_settle.is_zero() {
+            conn.quiet_until = Some(Instant::now() + self.command_settle);
+        }
         conn.finish(result)
     }
 
@@ -215,6 +246,10 @@ impl Session {
             conn.poisoned = false;
             conn.pending_terminator = false;
             tracing::info!(addr = %self.addr, "scpi session reconnected after a failed exchange");
+        }
+        // Held under the lock, so no other caller can slip in ahead of it.
+        if let Some(until) = conn.quiet_until.take() {
+            tokio::time::sleep_until(until).await;
         }
         Ok(conn)
     }
