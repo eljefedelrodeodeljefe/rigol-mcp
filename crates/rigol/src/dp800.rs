@@ -406,6 +406,46 @@ impl Dp800 {
             .await
     }
 
+    /// Turns over-voltage protection on or off (`:OUTPut:OVP[:STATe]`).
+    ///
+    /// With OVP on, the instrument itself turns the output off when the output
+    /// voltage passes the trip level (`:OUTP:OVP:VAL`), whoever set the
+    /// setpoint: this server, the front panel or another LAN client. That makes
+    /// it the one safeguard here that is not specific to this client. Enabling
+    /// needs no ceiling check — it can only remove power, never add it. The trip
+    /// level is not changed; set it first with [`Dp800::set_ovp`].
+    pub async fn set_ovp_enabled(&self, channel: u8, enabled: bool) -> Result<()> {
+        validate(channel)?;
+        let _operation = self.operation.lock().await;
+        tracing::info!(
+            op = "set_ovp_enabled",
+            channel,
+            enabled,
+            "{} over-voltage protection",
+            if enabled { "enabling" } else { "DISABLING" }
+        );
+        self.session
+            .command(&format!(":OUTP:OVP CH{channel},{}", on_off(enabled)))
+            .await
+    }
+
+    /// Turns over-current protection on or off (`:OUTPut:OCP[:STATe]`). See
+    /// [`Dp800::set_ovp_enabled`]; the trip level is set with [`Dp800::set_ocp`].
+    pub async fn set_ocp_enabled(&self, channel: u8, enabled: bool) -> Result<()> {
+        validate(channel)?;
+        let _operation = self.operation.lock().await;
+        tracing::info!(
+            op = "set_ocp_enabled",
+            channel,
+            enabled,
+            "{} over-current protection",
+            if enabled { "enabling" } else { "DISABLING" }
+        );
+        self.session
+            .command(&format!(":OUTP:OCP CH{channel},{}", on_off(enabled)))
+            .await
+    }
+
     pub async fn protection(&self, channel: u8) -> Result<Protection> {
         validate(channel)?;
         Ok(Protection {
@@ -515,6 +555,10 @@ fn strip_unit(s: &str) -> Option<f64> {
 /// everything else speaks colons.
 fn normalise_mac(raw: &str) -> String {
     raw.trim().replace('-', ":").to_ascii_uppercase()
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
 }
 
 #[cfg(test)]
