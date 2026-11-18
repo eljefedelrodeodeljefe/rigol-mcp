@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.4.0...v0.5.0) (2026-11-18)
+
+
+### Features
+
+* **dp800:** switch OVP/OCP protection on and off ([42de907](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/42de907b8220129077af304e67cce32dcbe57e6d))
+
+
+### Bug Fixes
+
+* **dp800:** wait after each command so write read-backs are answered ([72cf321](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/72cf321e17607086a7ed44b6cac1964e2d815db8))
+
 ## [0.4.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.3.1...v0.4.0) (2026-11-06)
 
 
