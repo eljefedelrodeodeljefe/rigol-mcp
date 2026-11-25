@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.6.0...v0.7.0) (2026-11-25)
+
+
+### Features
+
+* save_waveform writes a full scope record to .npz and sidecar ([ee6ad20](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/ee6ad20c100d48e2562d91641619e3ea8078138f))
+* save_waveform, a full scope record to .npz and sidecar ([398a52c](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/398a52cbca6cad0fb62c07336a86095d585a836a))
+* **scope:** read a channel's whole record from memory in blocks ([0a32d39](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/0a32d39fd020df7df0f1ac0e6a54c58c9cd39bbe))
+
+
+### Documentation
+
+* drop a public doc link to a private constant ([621c192](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/621c192acf029dbb03457a1a66a6f500572032a8))
+
 ## [0.6.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.5.0...v0.6.0) (2026-11-25)
 
 
