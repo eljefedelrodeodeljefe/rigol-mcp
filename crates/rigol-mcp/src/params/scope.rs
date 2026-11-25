@@ -1,4 +1,4 @@
-use rigol::{Coupling, DigitalChannel, MeasureItem, Slope, Sweep, Waveshape};
+use rigol::{Coupling, DigitalChannel, InputImpedance, MeasureItem, Slope, Sweep, Waveshape};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -25,6 +25,28 @@ pub struct WaveformParams {
         description = "Most points to return (default 1000, capped at 10000). Longer captures are thinned to min/max pairs per bucket, so peaks survive; the statistics always cover every sample"
     )]
     pub max_points: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SaveWaveformParams {
+    #[schemars(description = "Analog input channel, from 1 to the model's channel count")]
+    pub channel: u8,
+    #[schemars(
+        description = "Absolute path on the host running this server, ending in .npz. The JSON sidecar goes beside it with a .json extension. The directory must exist; an existing .npz or .json there is never overwritten"
+    )]
+    pub path: String,
+    #[schemars(
+        description = "RAW memory reads need the scope stopped (Programming Guide :WAVeform:MODE). If it is acquiring, stop it with :STOP for the read and restart it afterwards with :RUN (or :SINGle in single sweep). Default false: a running scope is refused. true requires RIGOL_ALLOW_WRITES"
+    )]
+    pub stop_if_running: Option<bool>,
+    #[schemars(
+        description = "Refuse unless the channel's input impedance is this (:CHANnel<n>:IMPedance? on an MHO900; a DHO input is always one_megohm). Checked before anything changes"
+    )]
+    pub expect_impedance: Option<InputImpedance>,
+    #[schemars(
+        description = "Points per :WAVeform:DATA? block (default 1000000, at most 10000000)"
+    )]
+    pub chunk_points: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

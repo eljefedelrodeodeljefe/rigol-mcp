@@ -547,6 +547,22 @@ impl RigolServer {
         Ok(Self::ok(&data))
     }
 
+    #[tool(
+        description = "Save one channel's whole acquisition record, not the thinned trace, to a file on the host running this server. Reads the scope's internal memory in blocks (:WAVeform:MODE RAW, :WAVeform:FORMat WORD, :WAVeform:STARt/STOP, :WAVeform:DATA?) with :WAVeform:PREamble?, the channel setup and input impedance (:CHANnel<n>:IMPedance? on an MHO900), :ACQuire:SRATe? and :TRIGger:POSition?. Writes <path>.npz (codes, volts and time arrays plus the scaling as scalars, readable with numpy.load) and a .json sidecar with the settings read back and the npz's SHA-256; never overwrites. RAW reads need the scope stopped: a running scope is refused unless stop_if_running, which sends :STOP and restarts the acquisition afterwards and requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn save_waveform(
+        &self,
+        Parameters(p): Parameters<SaveWaveformParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if p.stop_if_running.unwrap_or(false) {
+            self.guard_write()?;
+        }
+        let data = tools::scope::save_waveform(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
     // ── Writes ────────────────────────────────────────────────────────────────
     //
     // Display and acquisition only — nothing here reaches the device under
@@ -1031,6 +1047,7 @@ mod tests {
                 "measure_statistics",
                 "reset_measurement_statistics",
                 "run",
+                "save_waveform",
                 "single",
                 "stop",
             ]
@@ -1172,6 +1189,37 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("mho900"), "{err}");
+    }
+
+    /// Stopping the scope for a memory read is a write: with writes off,
+    /// `stop_if_running` is refused before the scope is even connected to.
+    #[tokio::test]
+    async fn save_waveform_stopping_the_scope_needs_writes() {
+        use rigol_fake::Fake;
+        let fake = Fake::start(vec![]).await;
+        let server = RigolServer::for_test(Family::Mho900, fake.addr);
+
+        let Err(err) = server
+            .save_waveform(Parameters(SaveWaveformParams {
+                channel: 1,
+                path: "/nonexistent/record.npz".into(),
+                stop_if_running: Some(true),
+                expect_impedance: None,
+                chunk_points: None,
+            }))
+            .await
+        else {
+            panic!("stopping the scope with writes off");
+        };
+
+        assert_eq!(err.code, ErrorCode::INVALID_REQUEST);
+        assert!(
+            err.message.contains("RIGOL_ALLOW_WRITES"),
+            "{}",
+            err.message
+        );
+        assert_eq!(fake.connections(), 0);
+        fake.finish();
     }
 
     /// Nothing that sets a PSU output can be reachable from a scope process.

@@ -5,6 +5,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 mod error;
 mod params;
+mod record;
 mod server;
 mod tools;
 

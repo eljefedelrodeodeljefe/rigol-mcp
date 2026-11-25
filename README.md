@@ -171,6 +171,7 @@ MHO900-AFG50 nor the MHO900-AFG100 option (`:SYSTem:OPTion:STATus?`).
 | `measure` | One automatic measurement (`:MEASure:ITEM?`); `null` when unmeasurable | — |
 | `measure_statistics` | Current/min/max/average/deviation/count for one measurement (`:MEASure:STATistic:ITEM?`) | — |
 | `get_waveform` | A trace in volts/seconds, thinned to min/max buckets, with full-capture stats | — |
+| `save_waveform` | The whole acquisition record of one channel, from memory, to an `.npz` and sidecar on the host (see below) | — (writes to stop a running scope) |
 | `get_identity` / `get_lan_config` / `get_instrument_errors` | Identity (with channel count), LAN, error queue | — |
 | `get_generator` | Signal generator state and its ceilings | — |
 | `get_logic_analyzer` | Logic analyser on/off, pod thresholds, which of D0–D15 are shown (DHO900, MHO900) | — |
@@ -183,6 +184,65 @@ MHO900-AFG50 nor the MHO900-AFG100 option (`:SYSTem:OPTion:STATus?`).
 | `generator_output_on` / `generator_output_off` | Drive or stop the signal | writes |
 
 Every tool's description names the SCPI command it sends, in Programming Guide terms.
+
+### Full records: `save_waveform`
+
+`get_waveform` reads the on-screen trace (1000 points) and thins it for the model.
+`save_waveform` reads the **whole record** in the scope's memory, up to the memory depth
+(100 Mpts on an MHO984 with one channel on, 25 Mpts with four), and writes it to a file on the
+host running the server, not into the conversation.
+
+| Parameter | Meaning |
+|---|---|
+| `channel` | Analog input, 1 to the model's channel count |
+| `path` | Absolute path ending in `.npz`, in an existing directory. The sidecar is the same path with `.json`. Neither file may exist: nothing is ever overwritten |
+| `stop_if_running` | Default `false`. See below |
+| `expect_impedance` | `fifty_ohm` or `one_megohm`: refuse unless the input is set to it (`:CHANnel<n>:IMPedance?` on an MHO900; a DHO input is always 1 MΩ) |
+| `chunk_points` | Points per `:WAVeform:DATA?` block, default 1 000 000 (2 MB), at most 10 000 000 |
+
+It follows the Programming Guide's procedure for reading the internal memory (3.28.5 in both
+the DHO800/DHO900 and MHO900 guides): `:WAVeform:MODE RAW`, `:WAVeform:FORMat WORD`, and
+`:WAVeform:STARt` / `:WAVeform:STOP` per block. The guides set no block size limit beyond the
+memory depth. Each block goes to disk as it arrives, so memory use stays at about one block,
+whatever the record length.
+
+**RAW reads need the scope stopped.** "The data in the internal memory can only be read when
+the oscilloscope is in the Stop state" (`:WAVeform:MODE`, 3.28.2). A stopped scope, for example
+after a `single` capture, is read as it is: only the waveform transfer settings change, and
+they go back to what `get_waveform` uses afterwards. A running scope is refused, unless
+`stop_if_running` is `true`. That requires `RIGOL_ALLOW_WRITES`: the tool sends `:STOP`, reads,
+and restarts the acquisition with `:RUN` (or `:SINGle` if the sweep is single), on failure too.
+Both commands are logged. No other call to the server's scope gets in between, as the guide
+requires; the front panel can, and a record that changed during the read (the scope no longer
+stopped, or its scaling different at the end) is an error rather than a file.
+
+The `.npz` loads with `numpy.load`:
+
+| Array | Type | Content |
+|---|---|---|
+| `codes` | `uint16`, one per sample | Raw WORD codes as read |
+| `volts` | `float64`, one per sample | `(codes − y_origin − y_reference) × y_increment` |
+| `time` | `float64`, one per sample | Seconds, `x_origin + (i − x_reference) × x_increment`; `x_increment` is 1/sample rate |
+| `x_increment`, `x_origin`, `x_reference`, `y_increment`, `y_origin`, `y_reference` | `float64` scalars | `:WAVeform:PREamble?` in RAW mode |
+| `sample_rate`, `volts_per_div`, `offset_volts`, `probe_ratio`, `input_impedance_ohms`, `seconds_per_div`, `timebase_offset_seconds` | `float64` scalars | Settings read back before the transfer |
+| `trigger_position` | `float64` scalar | `:TRIGger:POSition?`; NaN if the scope did not answer |
+| `channel`, `points`, `memory_depth` | `int64` scalars | `points` is shorter than `memory_depth` only if the memory ran out first |
+
+The JSON sidecar holds the instrument identity and family, the preamble as parsed and as sent,
+the channel setup, acquisition, timebase and trigger settings read back, how the transfer ran
+(blocks, whether the scope was stopped for it and how it was restarted), and the `.npz`'s size
+and SHA-256.
+
+The `.npy` header is written by this crate (the format is a 10-byte prefix and a Python dict
+literal); the ZIP container comes from the [`zip`](https://crates.io/crates/zip) crate with every
+compression feature off, for the ZIP64 records a member above 4 GiB needs. The members are stored
+uncompressed, as `numpy.savez` writes them.
+
+**Not yet run on hardware.** The RAW commands, `:WAVeform:STARt` / `:WAVeform:STOP` and
+`:TRIGger:POSition?` come from the guides and are in the probe's read-only list, but no
+instrument has answered them yet. In particular, whether `:ACQuire:MDEPth?` is the number of
+points RAW mode returns is unconfirmed: the tool asks for that many and ends the record at the
+first short block.
 
 ## Configuration
 

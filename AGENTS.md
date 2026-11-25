@@ -29,6 +29,7 @@ crates/rigol-mcp/      binary
   src/server.rs        MCP adapter — #[tool] stubs only, no logic; one router per family
   src/tools/           pure logic per family, returns anyhow::Result<Value>
   src/params/          Deserialize + JsonSchema structs per family
+  src/record.rs        save_waveform's files on the host: .npz (NPY here, ZIP via `zip`), sidecar
   src/error.rs         maps failures onto MCP error codes
 crates/rigol-fake/     test-only scripted fake instrument (unpublished)
 ```
