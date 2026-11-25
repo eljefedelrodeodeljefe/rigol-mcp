@@ -85,6 +85,15 @@ pub enum Error {
         ceiling: f64,
     },
 
+    /// A channel's input impedance is not the one the caller required,
+    /// refused before anything changes on the instrument.
+    #[error("refused: channel {channel} input is {actual}, not the required {expected}")]
+    WrongImpedance {
+        channel: u8,
+        expected: crate::dho900::InputImpedance,
+        actual: crate::dho900::InputImpedance,
+    },
+
     #[error("instrument reported error {code}: {message}")]
     Instrument { code: i32, message: String },
 }

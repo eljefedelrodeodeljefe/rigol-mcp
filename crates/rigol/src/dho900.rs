@@ -43,6 +43,20 @@ pub const LA_THRESHOLD_LIMIT_VOLTS: f64 = 15.0;
 /// milliseconds; the margin is for a loaded network.
 const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Points per `:WAVeform:DATA?` block in a memory read unless the caller
+/// says: 2 MB of WORD data. The Programming Guides (3.28) set no limit per
+/// block beyond the memory depth; this keeps each block well inside
+/// the 30 s block-read timeout and the session's block cap.
+pub const DEFAULT_MEMORY_CHUNK_POINTS: usize = 1_000_000;
+
+/// Most points per block in a memory read: 20 MB of WORD data, under the
+/// default 64 MiB block cap.
+pub const MAX_MEMORY_CHUNK_POINTS: usize = 10_000_000;
+
+/// How long [`Dho900::read_memory`] waits for `:TRIGger:STATus?` to read
+/// STOP after sending `:STOP`.
+const STOP_SETTLE: Duration = Duration::from_secs(2);
+
 /// A measurement the scope can make on a channel, in Programming Guide terms
 /// (`:MEASure:ITEM? <item>,<source>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +345,23 @@ impl InputImpedance {
             "FIFT" | "FIFTY" => Some(Self::FiftyOhm),
             _ => None,
         }
+    }
+
+    /// The impedance in ohms.
+    pub fn ohms(self) -> f64 {
+        match self {
+            Self::OneMegohm => 1.0e6,
+            Self::FiftyOhm => 50.0,
+        }
+    }
+}
+
+impl std::fmt::Display for InputImpedance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::OneMegohm => "1 MΩ",
+            Self::FiftyOhm => "50 Ω",
+        })
     }
 }
 
@@ -677,6 +708,78 @@ impl Waveform {
     }
 }
 
+/// How [`Dho900::read_memory`] reads a record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryReadOptions {
+    /// Points per `:WAVeform:DATA?` block, from 1 to
+    /// [`MAX_MEMORY_CHUNK_POINTS`].
+    pub chunk_points: usize,
+    /// Stop a running acquisition for the read and restart it afterwards.
+    /// Without it, a running scope is refused: RAW reads need it stopped.
+    /// Stopping is a write; a caller that gates writes gates this.
+    pub stop_if_running: bool,
+    /// Refuse the read unless the channel's input is this impedance. A DHO
+    /// input is always 1 MΩ.
+    pub expect_impedance: Option<InputImpedance>,
+}
+
+impl Default for MemoryReadOptions {
+    fn default() -> Self {
+        Self {
+            chunk_points: DEFAULT_MEMORY_CHUNK_POINTS,
+            stop_if_running: false,
+            expect_impedance: None,
+        }
+    }
+}
+
+/// Everything known about a record read by [`Dho900::read_memory`], apart
+/// from its samples, which went to the caller's sink.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemoryRecord {
+    pub channel: u8,
+    /// Samples delivered to the sink.
+    pub points: usize,
+    /// `:ACQuire:MDEPth?`, the record length asked for. `points` is shorter
+    /// only if the scope ran out of samples first.
+    pub memory_depth: usize,
+    /// `:WAVeform:DATA?` blocks read.
+    pub chunks: usize,
+    pub chunk_points: usize,
+    /// `:WAVeform:PREamble?` in RAW mode, read with the first block's range
+    /// set, so `x_origin` is the time of the first sample.
+    pub preamble: Preamble,
+    /// The preamble reply as the scope sent it.
+    pub preamble_raw: String,
+    /// The channel's vertical setup, read before the transfer.
+    pub channel_state: ChannelState,
+    /// 1 MΩ on a DHO; read with `:CHANnel<n>:IMPedance?` on an MHO900.
+    pub input_impedance: InputImpedance,
+    /// `:ACQuire:SRATe?`, samples per second.
+    pub sample_rate: f64,
+    /// `:ACQuire:TYPE?`.
+    pub acquisition_type: String,
+    /// `:TIMebase:MAIN:SCALe?`.
+    pub seconds_per_div: f64,
+    /// `:TIMebase:MAIN:OFFSet?`.
+    pub timebase_offset_seconds: f64,
+    /// `:TRIGger:POSition?`, the trigger's position in the internal memory;
+    /// `None` if the scope did not answer it.
+    pub trigger_position: Option<f64>,
+    /// `:TRIGger:MODE?`.
+    pub trigger_mode: String,
+    /// `:TRIGger:SWEep?`.
+    pub trigger_sweep: String,
+    /// `:TRIGger:STATus?` before the read: STOP, or the running state the
+    /// read stopped.
+    pub trigger_status_before: String,
+    /// Whether this read sent `:STOP`.
+    pub stopped_for_read: bool,
+    /// The command that put the acquisition back afterwards (`:RUN`, or
+    /// `:SINGle` for single sweep), if it was stopped for the read.
+    pub restored_with: Option<&'static str>,
+}
+
 /// A DHO800/DHO900 or MHO900-series oscilloscope. Signal-generator writes go
 /// through the ceilings in [`GeneratorLimits`]; the SCPI session underneath
 /// is not handed out, because a raw command would go around them:
@@ -953,6 +1056,8 @@ impl Dho900 {
     /// touch acquisition, triggering or anything on screen.
     pub async fn waveform(&self, channel: u8) -> Result<Waveform> {
         self.check_channel(channel)?;
+        // Not in the middle of a memory read's transfer settings.
+        let _operation = self.operation.lock().await;
         self.session
             .command(&format!(":WAVeform:SOURce CHANnel{channel}"))
             .await?;
@@ -972,6 +1077,342 @@ impl Dho900 {
         Waveform::decode(channel, preamble, &data)
     }
 
+    /// Reads one channel's whole acquisition record from the internal
+    /// memory, in blocks of `opts.chunk_points` samples, and hands each
+    /// block's raw codes to `sink` as it arrives. Nothing holds more than one
+    /// block, so a record as long as the memory depth costs one block of
+    /// memory here.
+    ///
+    /// Follows "Procedures of reading the waveform data from the internal
+    /// memory" (DHO800/DHO900 and MHO900 Programming Guides, 3.28.5):
+    /// `:WAVeform:MODE RAW` with `WORD` data and `:WAVeform:STARt` /
+    /// `:WAVeform:STOP` per block. RAW reads the memory **only while the
+    /// scope is stopped** (3.28.2). A stopped scope is read as it is, and
+    /// nothing but the waveform transfer settings changes. A running one is
+    /// refused unless `opts.stop_if_running`: then this sends `:STOP`, reads,
+    /// and puts the acquisition back with `:RUN` (or `:SINGle` in single
+    /// sweep), on failure too.
+    ///
+    /// Afterwards the transfer settings go back to what
+    /// [`Dho900::waveform`] reads with: `NORMal` mode, points 1 to 1000.
+    ///
+    /// Refused before anything is sent if the channel is not displayed (the
+    /// memory holds no record for it) or its input impedance is not
+    /// `opts.expect_impedance`.
+    pub async fn read_memory<F>(
+        &self,
+        channel: u8,
+        opts: &MemoryReadOptions,
+        mut sink: F,
+    ) -> Result<MemoryRecord>
+    where
+        F: FnMut(&[u16]) -> std::io::Result<()>,
+    {
+        self.check_channel(channel)?;
+        if !(1..=MAX_MEMORY_CHUNK_POINTS).contains(&opts.chunk_points) {
+            return Err(Error::OutOfRange {
+                what: "chunk_points",
+                value: opts.chunk_points as f64,
+                allowed: format!("1 to {MAX_MEMORY_CHUNK_POINTS}"),
+            });
+        }
+        // The guide: "You are not allowed to operate the instrument when it
+        // is reading data." No other call through this model gets in between.
+        let _operation = self.operation.lock().await;
+
+        let channel_state = self.channel(channel).await?;
+        let input_impedance = channel_state
+            .input_impedance
+            .unwrap_or(InputImpedance::OneMegohm);
+        if let Some(expected) = opts.expect_impedance
+            && expected != input_impedance
+        {
+            return Err(Error::WrongImpedance {
+                channel,
+                expected,
+                actual: input_impedance,
+            });
+        }
+        if !channel_state.displayed {
+            return Err(Error::Conflicting(
+                "the channel is off, so the memory holds no record for it",
+            ));
+        }
+
+        let trigger_status_before = self.text(":TRIGger:STATus?").await?;
+        let trigger_sweep = self.text(":TRIGger:SWEep?").await?;
+        let running = !trigger_status_before.trim().eq_ignore_ascii_case("STOP");
+        if running && !opts.stop_if_running {
+            return Err(Error::Conflicting(concat!(
+                "the scope is acquiring, and a memory (RAW) read needs it stopped: ",
+                "stop it first, or allow this read to stop it and restart it afterwards",
+            )));
+        }
+        let restore = running.then(|| {
+            if trigger_sweep
+                .trim()
+                .to_ascii_uppercase()
+                .starts_with("SING")
+            {
+                ":SINGle"
+            } else {
+                ":RUN"
+            }
+        });
+
+        if running {
+            tracing::info!(
+                channel,
+                status = %trigger_status_before,
+                "stopping acquisition for a memory read (:STOP)"
+            );
+        }
+        let result = async {
+            if running {
+                self.session.command(":STOP").await?;
+                self.wait_stopped().await?;
+            }
+            self.read_stopped_memory(channel, opts.chunk_points, &mut sink)
+                .await
+        }
+        .await;
+        let reset = self.reset_waveform_transfer().await;
+        let restored = match restore {
+            Some(cmd) => {
+                tracing::info!(
+                    channel,
+                    command = cmd,
+                    "restarting acquisition after a memory read"
+                );
+                self.session.command(cmd).await
+            }
+            None => Ok(()),
+        };
+        // The read's own failure says the most; report a failed reset or
+        // restart only if the read worked.
+        let transfer = match result {
+            Ok(t) => t,
+            Err(e) => {
+                if let Err(r) = reset.and(restored) {
+                    tracing::warn!(error = %r, "could not put the scope back after a failed memory read");
+                }
+                return Err(e);
+            }
+        };
+        reset?;
+        restored?;
+
+        Ok(MemoryRecord {
+            channel,
+            points: transfer.points,
+            memory_depth: transfer.memory_depth,
+            chunks: transfer.chunks,
+            chunk_points: opts.chunk_points,
+            preamble: transfer.preamble,
+            preamble_raw: transfer.preamble_raw,
+            channel_state,
+            input_impedance,
+            sample_rate: transfer.sample_rate,
+            acquisition_type: transfer.acquisition_type,
+            seconds_per_div: transfer.seconds_per_div,
+            timebase_offset_seconds: transfer.timebase_offset_seconds,
+            trigger_position: transfer.trigger_position,
+            trigger_mode: transfer.trigger_mode,
+            trigger_sweep,
+            trigger_status_before,
+            stopped_for_read: running,
+            restored_with: restore,
+        })
+    }
+
+    /// Polls `:TRIGger:STATus?` until it reads STOP, for up to
+    /// [`STOP_SETTLE`].
+    async fn wait_stopped(&self) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + STOP_SETTLE;
+        loop {
+            let status = self.text(":TRIGger:STATus?").await?;
+            if status.trim().eq_ignore_ascii_case("STOP") {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Protocol {
+                    cmd: ":STOP".into(),
+                    detail: format!("trigger status still {status} after {STOP_SETTLE:?}"),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The transfer itself, on a stopped scope.
+    async fn read_stopped_memory(
+        &self,
+        channel: u8,
+        chunk_points: usize,
+        sink: &mut impl FnMut(&[u16]) -> std::io::Result<()>,
+    ) -> Result<MemoryTransfer> {
+        let depth_cmd = ":ACQuire:MDEPth?";
+        let depth = self.number(depth_cmd).await?;
+        if !(depth.is_finite() && depth >= 1.0) {
+            return Err(Error::Parse {
+                cmd: depth_cmd.into(),
+                reply: depth.to_string(),
+            });
+        }
+        let memory_depth = depth.round() as usize;
+        let sample_rate = self.number(":ACQuire:SRATe?").await?;
+        let acquisition_type = self.text(":ACQuire:TYPE?").await?;
+        let seconds_per_div = self.number(":TIMebase:MAIN:SCALe?").await?;
+        let timebase_offset_seconds = self.number(":TIMebase:MAIN:OFFSet?").await?;
+        let trigger_mode = self.text(":TRIGger:MODE?").await?;
+        // In both guides (3.27.7), but not yet seen answered by a scope;
+        // the record is still worth saving without it.
+        let trigger_position = match self.number(":TRIGger:POSition?").await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(error = %e, "no reply to :TRIGger:POSition?; saving without it");
+                None
+            }
+        };
+
+        self.session
+            .command(&format!(":WAVeform:SOURce CHANnel{channel}"))
+            .await?;
+        self.session.command(":WAVeform:MODE RAW").await?;
+        self.session.command(":WAVeform:FORMat WORD").await?;
+        // The first range is set before the preamble is read, so its
+        // x origin is the first sample's time. STARt goes first: it must not
+        // pass a STOP left over from an earlier read.
+        let mut start = 1usize;
+        let mut stop = chunk_points.min(memory_depth);
+        self.session.command(":WAVeform:STARt 1").await?;
+        self.session
+            .command(&format!(":WAVeform:STOP {stop}"))
+            .await?;
+
+        let pre_cmd = ":WAVeform:PREamble?";
+        let preamble_raw = self.session.query(pre_cmd).await?;
+        let preamble = Preamble::parse(&preamble_raw).ok_or_else(|| Error::Parse {
+            cmd: pre_cmd.into(),
+            reply: preamble_raw.clone(),
+        })?;
+        if preamble.format != 1 {
+            return Err(Error::Protocol {
+                cmd: pre_cmd.into(),
+                detail: format!(
+                    "expected WORD data (format 1), got format {}",
+                    preamble.format
+                ),
+            });
+        }
+
+        let data_cmd = ":WAVeform:DATA?";
+        let mut codes: Vec<u16> = Vec::with_capacity(stop);
+        let (mut points, mut chunks) = (0usize, 0usize);
+        loop {
+            if chunks > 0 {
+                // Moving forward, STOP goes first so the range never inverts.
+                self.session
+                    .command(&format!(":WAVeform:STOP {stop}"))
+                    .await?;
+                self.session
+                    .command(&format!(":WAVeform:STARt {start}"))
+                    .await?;
+            }
+            let want = stop - start + 1;
+            let data = self
+                .session
+                .query_block_with_timeout(data_cmd, WAVEFORM_TIMEOUT)
+                .await?;
+            let (words, rest) = data.as_chunks::<2>();
+            if !rest.is_empty() || words.len() > want {
+                return Err(Error::Protocol {
+                    cmd: data_cmd.into(),
+                    detail: format!(
+                        "asked for points {start} to {stop} ({want} WORD samples), got {} bytes",
+                        data.len()
+                    ),
+                });
+            }
+            codes.clear();
+            codes.extend(words.iter().map(|w| u16::from_le_bytes(*w)));
+            drop(data);
+            sink(&codes)?;
+            points += codes.len();
+            chunks += 1;
+            if codes.len() < want {
+                tracing::warn!(
+                    points,
+                    memory_depth,
+                    "the scope returned fewer points than the memory depth; the record ends here"
+                );
+                break;
+            }
+            if points >= memory_depth {
+                break;
+            }
+            start = points + 1;
+            stop = (points + chunk_points).min(memory_depth);
+        }
+        if points == 0 {
+            return Err(Error::Protocol {
+                cmd: data_cmd.into(),
+                detail: "the memory returned no samples".into(),
+            });
+        }
+
+        // A record that changed under the transfer (someone pressed RUN on
+        // the front panel) would mix two acquisitions.
+        let after_raw = self.session.query(pre_cmd).await?;
+        let after = Preamble::parse(&after_raw).ok_or_else(|| Error::Parse {
+            cmd: pre_cmd.into(),
+            reply: after_raw.clone(),
+        })?;
+        let status = self.text(":TRIGger:STATus?").await?;
+        let same_scaling = (
+            after.x_increment,
+            after.y_increment,
+            after.y_origin,
+            after.y_reference,
+        ) == (
+            preamble.x_increment,
+            preamble.y_increment,
+            preamble.y_origin,
+            preamble.y_reference,
+        );
+        if !same_scaling || !status.trim().eq_ignore_ascii_case("STOP") {
+            return Err(Error::Protocol {
+                cmd: pre_cmd.into(),
+                detail: format!(
+                    "the record changed during the read (trigger status {status}, \
+                    preamble {preamble_raw} then {after_raw})"
+                ),
+            });
+        }
+
+        Ok(MemoryTransfer {
+            points,
+            memory_depth,
+            chunks,
+            preamble,
+            preamble_raw,
+            sample_rate,
+            acquisition_type,
+            seconds_per_div,
+            timebase_offset_seconds,
+            trigger_position,
+            trigger_mode,
+        })
+    }
+
+    /// Puts the waveform transfer settings back to what
+    /// [`Dho900::waveform`] reads with.
+    async fn reset_waveform_transfer(&self) -> Result<()> {
+        self.session.command(":WAVeform:MODE NORMal").await?;
+        self.session.command(":WAVeform:STARt 1").await?;
+        self.session.command(":WAVeform:STOP 1000").await
+    }
+
     // ── Writes ───────────────────────────────────────────────────────────────
     //
     // None of these reach the device under test: they change what the scope
@@ -980,22 +1421,26 @@ impl Dho900 {
 
     /// Starts acquiring (`:RUN`).
     pub async fn run(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
         self.session.command(":RUN").await
     }
 
     /// Stops acquiring (`:STOP`).
     pub async fn stop(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
         self.session.command(":STOP").await
     }
 
     /// Arms a single acquisition on the next trigger (`:SINGle`).
     pub async fn single(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
         self.session.command(":SINGle").await
     }
 
     /// Lets the scope pick scale, timebase and trigger for the signal
     /// (`:AUToset`).
     pub async fn autoset(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
         self.session.command(":AUToset").await
     }
 
@@ -1581,6 +2026,21 @@ impl Dho900 {
             }),
         }
     }
+}
+
+/// What [`Dho900::read_memory`] learns during the transfer.
+struct MemoryTransfer {
+    points: usize,
+    memory_depth: usize,
+    chunks: usize,
+    preamble: Preamble,
+    preamble_raw: String,
+    sample_rate: f64,
+    acquisition_type: String,
+    seconds_per_div: f64,
+    timebase_offset_seconds: f64,
+    trigger_position: Option<f64>,
+    trigger_mode: String,
 }
 
 /// A generator channel's command prefix and the hardware behind it.

@@ -26,10 +26,11 @@ pub mod limits;
 pub mod scpi;
 
 pub use dho900::{
-    Applied, Bucket, ChannelConfig, ChannelState, Coupling, Dho900, DigitalChannel, EdgeTrigger,
-    EdgeTriggerConfig, GeneratorLoad, GeneratorState, InputImpedance, LA_THRESHOLD_LIMIT_VOLTS,
-    LogicAnalyzer, LogicAnalyzerConfig, MeasureItem, MeasureStatistics, Preamble, Reading,
-    ScopeLan, ScopeStatus, Slope, Sweep, Timebase, Waveform, WaveformStats,
+    Applied, Bucket, ChannelConfig, ChannelState, Coupling, DEFAULT_MEMORY_CHUNK_POINTS, Dho900,
+    DigitalChannel, EdgeTrigger, EdgeTriggerConfig, GeneratorLoad, GeneratorState, InputImpedance,
+    LA_THRESHOLD_LIMIT_VOLTS, LogicAnalyzer, LogicAnalyzerConfig, MAX_MEMORY_CHUNK_POINTS,
+    MeasureItem, MeasureStatistics, MemoryReadOptions, MemoryRecord, Preamble, Reading, ScopeLan,
+    ScopeStatus, Slope, Sweep, Timebase, Waveform, WaveformStats,
 };
 pub use dp800::{
     Channel, DP800_COMMAND_SETTLE, Dp800, LanConfig, Measurement, OutputState, Protection, Rating,
