@@ -901,3 +901,28 @@ async fn concurrent_generator_changes_never_exceed_the_ceiling() {
         fake.finish();
     }
 }
+
+/// A DHO has one generator channel, addressed as `:SOURce`.
+#[tokio::test]
+async fn a_dho_has_no_second_generator_channel() {
+    let (fake, scope) = connect(vec![]).await;
+    assert_eq!(scope.generator_channels(), 1);
+    assert_eq!(scope.clear_measurements_command(), ":MEASure:CLEar");
+    let err = scope.generator_channel(2).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::NoSuchInput {
+                channel: 2,
+                count: 1
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        scope
+            .with_generator_channel_limits(2, GeneratorLimits::default())
+            .is_err()
+    );
+    fake.finish();
+}

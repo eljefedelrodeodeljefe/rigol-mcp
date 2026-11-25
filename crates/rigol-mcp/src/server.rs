@@ -26,15 +26,18 @@ pub struct RigolServer {
     port: Option<u16>,
     cfg: SessionConfig,
     configured_limits: Limits,
-    /// Ceilings for the scope's signal generator. The hardware range unless
-    /// tightened with RIGOL_GEN_MAX_VPP and RIGOL_GEN_MAX_PEAK_VOLTS.
-    generator_limits: GeneratorLimits,
+    /// Ceilings for the scope's signal generator, one per generator channel
+    /// (a DHO has one, an MHO900 two). The hardware range unless tightened
+    /// with `RIGOL_GEN_MAX_VPP` / `RIGOL_GEN_MAX_PEAK_VOLTS`, or per MHO900
+    /// channel with `RIGOL_GEN<n>_MAX_VPP` / `RIGOL_GEN<n>_MAX_PEAK_VOLTS`.
+    generator_limits: [GeneratorLimits; 2],
     writes_enabled: bool,
     /// Connected on first use. Two concurrent sessions were verified to coexist
     /// on this instrument, and a session survives idle, so holding one open is
     /// safe.
     psu: OnceCell<Dp800>,
-    /// The oscilloscope, for a `dho900` process. Connected on first use.
+    /// The oscilloscope, for a `dho900` or `mho900` process. Connected on
+    /// first use.
     scope: OnceCell<Dho900>,
 }
 
@@ -86,17 +89,7 @@ impl RigolServer {
             }
         }
 
-        let generator_limits = match (
-            f64_var("RIGOL_GEN_MAX_VPP")?,
-            f64_var("RIGOL_GEN_MAX_PEAK_VOLTS")?,
-        ) {
-            (Some(vpp), Some(peak)) => GeneratorLimits::new(vpp, peak)
-                .context("RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS")?,
-            (None, None) => GeneratorLimits::default(),
-            _ => {
-                anyhow::bail!("RIGOL_GEN_MAX_VPP and RIGOL_GEN_MAX_PEAK_VOLTS must be set together")
-            }
-        };
+        let generator_limits = generator_limits_from(family, &f64_var)?;
 
         Ok(Self {
             family,
@@ -139,7 +132,7 @@ impl RigolServer {
             port: Some(addr.port()),
             cfg: SessionConfig::default(),
             configured_limits: Limits::new(),
-            generator_limits: GeneratorLimits::default(),
+            generator_limits: [GeneratorLimits::default(); 2],
             writes_enabled: false,
             psu: OnceCell::new(),
             scope: OnceCell::new(),
@@ -152,16 +145,24 @@ impl RigolServer {
     fn router_for(family: Family) -> ToolRouter<Self> {
         match family {
             Family::Dp800 => Self::psu_router(),
-            Family::Dho900 => Self::scope_router(),
+            Family::Dho900 => Self::scope_router() + Self::dho_scope_router(),
+            Family::Mho900 => Self::scope_router() + Self::mho_scope_router(),
         }
     }
 
     async fn scope(&self) -> Result<&Dho900, ErrorData> {
         self.scope
             .get_or_try_init(|| async {
-                Dho900::connect(&self.host, self.port, self.cfg.clone())
-                    .await
-                    .map(|scope| scope.with_generator_limits(self.generator_limits))
+                let [first, second] = self.generator_limits;
+                let scope =
+                    Dho900::connect_as(&self.host, self.port, self.cfg.clone(), self.family)
+                        .await?
+                        .with_generator_limits(first);
+                if scope.generator_channels() == 2 {
+                    scope.with_generator_channel_limits(2, second)
+                } else {
+                    Ok(scope)
+                }
             })
             .await
             .map_err(|e| tool_error(e.into()))
@@ -208,6 +209,53 @@ fn parse_bool_env(key: &str, value: Option<String>) -> anyhow::Result<Option<boo
         "false" | "0" | "no" => Ok(Some(false)),
         _ => anyhow::bail!("{key} must be one of true/false, 1/0, yes/no; got {v:?}"),
     }
+}
+
+/// Generator ceilings for each generator channel. `RIGOL_GEN_MAX_VPP` and
+/// `RIGOL_GEN_MAX_PEAK_VOLTS` apply to every channel; on an MHO900,
+/// `RIGOL_GEN<n>_MAX_VPP` and `RIGOL_GEN<n>_MAX_PEAK_VOLTS` (n = 1 or 2)
+/// override one. Each pair is set together and checked against the family's
+/// hardware range: 10 Vpp / 5 V on a DHO, 20 Vpp / 10 V open-circuit on an
+/// MHO900. A PSU process never drives a generator, but its values are still
+/// checked, against the DHO range, as they were before the MHO900.
+fn generator_limits_from(
+    family: Family,
+    f64_var: &dyn Fn(&str) -> anyhow::Result<Option<f64>>,
+) -> anyhow::Result<[GeneratorLimits; 2]> {
+    let range = match family {
+        Family::Mho900 => Family::Mho900,
+        Family::Dho900 | Family::Dp800 => Family::Dho900,
+    };
+    let pair = |vpp: &str, peak: &str| -> anyhow::Result<Option<GeneratorLimits>> {
+        match (f64_var(vpp)?, f64_var(peak)?) {
+            (Some(v), Some(p)) => Ok(Some(
+                GeneratorLimits::for_family(range, v, p)
+                    .with_context(|| format!("{vpp} / {peak}"))?,
+            )),
+            (None, None) => Ok(None),
+            _ => anyhow::bail!("{vpp} and {peak} must be set together"),
+        }
+    };
+    let every = match pair("RIGOL_GEN_MAX_VPP", "RIGOL_GEN_MAX_PEAK_VOLTS")? {
+        Some(limits) => limits,
+        None => GeneratorLimits::hardware(range)?,
+    };
+    let mut limits = [every; 2];
+    for ch in 1..=2u8 {
+        let (vpp, peak) = (
+            format!("RIGOL_GEN{ch}_MAX_VPP"),
+            format!("RIGOL_GEN{ch}_MAX_PEAK_VOLTS"),
+        );
+        if let Some(l) = pair(&vpp, &peak)? {
+            anyhow::ensure!(
+                family == Family::Mho900,
+                "{vpp} / {peak} are for an mho900, the family with two generator channels; {}",
+                "use RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS"
+            );
+            limits[usize::from(ch - 1)] = l;
+        }
+    }
+    Ok(limits)
 }
 
 /// A ceiling from the environment. `str::parse::<f64>` accepts `NaN` and
@@ -437,7 +485,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Get trigger status and edge setup, timebase, sample rate, memory depth, acquisition type, and every channel's display/scale/offset/coupling/probe (:TRIGger:STATus? :TIMebase:MAIN:SCALe? :ACQuire:SRATe? :CHANnel<n>:…). trigger_status is TD (triggered), WAIT, RUN, AUTO or STOP"
+        description = "Get trigger status and edge setup, timebase, sample rate, memory depth, acquisition type, and every channel's display/scale/offset/coupling/probe, plus input impedance on an MHO900 (:TRIGger:STATus? :TIMebase:MAIN:SCALe? :ACQuire:SRATe? :CHANnel<n>:…). trigger_status is TD (triggered), WAIT, RUN, AUTO or STOP"
     )]
     async fn get_status(&self) -> Result<CallToolResult, ErrorData> {
         let data = tools::scope::status(self.scope().await?)
@@ -547,17 +595,6 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Remove every measurement from the scope's on-screen list (:MEASure:CLEar), including those added by measure. Requires RIGOL_ALLOW_WRITES"
-    )]
-    async fn clear_measurements(&self) -> Result<CallToolResult, ErrorData> {
-        self.guard_write()?;
-        let data = tools::scope::clear_measurements(self.scope().await?)
-            .await
-            .map_err(tool_error)?;
-        Ok(Self::ok(&data))
-    }
-
-    #[tool(
         description = "Clear the statistics history of every measurement item and start counting again (:MEASure:STATistic:RESet). The items stay in the on-screen list. Returns any errors the scope raised. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn reset_measurement_statistics(&self) -> Result<CallToolResult, ErrorData> {
@@ -597,7 +634,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:SOURce CHANnel<n>|D<n>, :TRIGger:EDGE:SLOPe, :TRIGger:EDGE:LEVel, :TRIGger:SWEep). The source is an analog channel or, on the DHO900 series, a digital channel D0–D15. Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
+        description = "Switch to an edge trigger and set its source, slope, level and sweep (:TRIGger:MODE EDGE, :TRIGger:EDGE:SOURce CHANnel<n>|D<n>, :TRIGger:EDGE:SLOPe, :TRIGger:EDGE:LEVel, :TRIGger:SWEep). The source is an analog channel or, on the DHO900 and MHO900 series, a digital channel D0–D15. Omitted fields are left alone. Returns what the scope holds afterwards plus any errors it raised. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn configure_edge_trigger(
         &self,
@@ -610,10 +647,10 @@ impl RigolServer {
         Ok(Self::ok(&data))
     }
 
-    // ── Logic analyser (DHO900 series only) ───────────────────────────────────
+    // ── Logic analyser (DHO900 and MHO900 series) ─────────────────────────────
 
     #[tool(
-        description = "Get the logic analyser's state: on or off, the POD1 (D0–D7) and POD2 (D8–D15) logic thresholds in volts, and which of D0–D15 are shown (:LA:ENABle? :LA:POD<n>:THReshold? :LA:DIGital:ENABle? D<n>). DHO900 series only"
+        description = "Get the logic analyser's state: on or off, the POD1 (D0–D7) and POD2 (D8–D15) logic thresholds in volts, and which of D0–D15 are shown (:LA:ENABle? :LA:POD<n>:THReshold? :LA:DIGital:ENABle? D<n>). DHO900 and MHO900 series, not the DHO800"
     )]
     async fn get_logic_analyzer(&self) -> Result<CallToolResult, ErrorData> {
         let data = tools::scope::logic_analyzer(self.scope().await?)
@@ -623,7 +660,7 @@ impl RigolServer {
     }
 
     #[tool(
-        description = "Turn the logic analyser on or off, show or hide digital channels D0–D15, and set the pod logic thresholds (:LA:ENABle, :LA:DIGital:ENABle D<n>,<bool>, :LA:POD<n>:THReshold). Omitted fields are left alone. Turning the analyser on shows D0–D7 again, so list any other channels in show in the same call. Returns what the scope holds afterwards plus any errors it raised. DHO900 series only. Requires RIGOL_ALLOW_WRITES"
+        description = "Turn the logic analyser on or off, show or hide digital channels D0–D15, and set the pod logic thresholds (:LA:ENABle, :LA:DIGital:ENABle D<n>,<bool>, :LA:POD<n>:THReshold). Omitted fields are left alone. Turning the analyser on shows D0–D7 again, so list any other channels in show in the same call. Returns what the scope holds afterwards plus any errors it raised. DHO900 and MHO900 series, not the DHO800. Requires RIGOL_ALLOW_WRITES"
     )]
     async fn configure_logic_analyzer(
         &self,
@@ -631,6 +668,22 @@ impl RigolServer {
     ) -> Result<CallToolResult, ErrorData> {
         self.guard_write()?;
         let data = tools::scope::configure_logic_analyzer(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+}
+
+/// DHO800/DHO900-only scope tools: the measurement-clear spelling and the
+/// one-channel signal generator.
+#[tool_router(router = dho_scope_router)]
+impl RigolServer {
+    #[tool(
+        description = "Remove every measurement from the scope's on-screen list (:MEASure:CLEar), including those added by measure. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn clear_measurements(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::clear_measurements(self.scope().await?)
             .await
             .map_err(tool_error)?;
         Ok(Self::ok(&data))
@@ -689,12 +742,96 @@ impl RigolServer {
     }
 }
 
+/// MHO900-only scope tools: `:MEASure:DELete`, and the optional
+/// two-channel generator (MHO900-AFG50 or MHO900-AFG100), whose tools take
+/// the generator channel.
+#[tool_router(router = mho_scope_router)]
+impl RigolServer {
+    #[tool(
+        name = "clear_measurements",
+        description = "Remove every measurement from the scope's on-screen list (:MEASure:DELete), including those added by measure. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn mho_clear_measurements(&self) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::clear_measurements(self.scope().await?)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    // ── Signal generator ──────────────────────────────────────────────────────
+    //
+    // The DHO rules, per channel. Ceilings bound the open-circuit voltage: a
+    // channel set to a 50 Ω load (:SOURce<n>:IMPedance FIFTy) counts twice
+    // its settings, because that is what an unterminated input sees.
+
+    #[tool(
+        name = "get_generator",
+        description = "Get one generator channel's state: output on/off, waveform, frequency, amplitude, offset, output load (high_z or fifty_ohm), open-circuit peak excursion, and the ceilings in force (:SOURce<n>:OUTPut:STATe? :FUNCtion? :FREQuency? :VOLTage:AMPLitude? :VOLTage:OFFSet? :IMPedance?). Refused when option MHO900-AFG50 or MHO900-AFG100 is not installed (:SYSTem:OPTion:STATus?)"
+    )]
+    async fn mho_get_generator(
+        &self,
+        Parameters(p): Parameters<GeneratorChannelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let data = tools::scope::generator_channel(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        name = "configure_generator",
+        description = "Set one generator channel's waveform, frequency, amplitude and/or offset (:SOURce<n>:FUNCtion / :FREQuency / :VOLTage:AMPLitude / :VOLTage:OFFSet). Does NOT turn the output on. Refused if the open-circuit amplitude or peak |offset| + amplitude/2 would exceed that channel's ceilings; with the channel set to a 50 Ω load the open-circuit values are twice the settings. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn mho_configure_generator(
+        &self,
+        Parameters(p): Parameters<ConfigureGeneratorChannelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::configure_generator_channel(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        name = "generator_output_on",
+        description = "Turn one generator channel's output ON (:SOURce<n>:OUTPut:STATe ON). This drives a signal into whatever is connected. The channel's settings and load setting are read and checked against its ceilings first. Confirm with the user before calling. Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn mho_generator_output_on(
+        &self,
+        Parameters(p): Parameters<GeneratorChannelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::generator_channel_output_on(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+
+    #[tool(
+        name = "generator_output_off",
+        description = "Turn one generator channel's output OFF (:SOURce<n>:OUTPut:STATe OFF). Requires RIGOL_ALLOW_WRITES"
+    )]
+    async fn mho_generator_output_off(
+        &self,
+        Parameters(p): Parameters<GeneratorChannelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.guard_write()?;
+        let data = tools::scope::generator_channel_output_off(self.scope().await?, &p)
+            .await
+            .map_err(tool_error)?;
+        Ok(Self::ok(&data))
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RigolServer {
     fn get_info(&self) -> ServerConfig {
         let instructions = match self.family {
             Family::Dp800 => PSU_INSTRUCTIONS,
             Family::Dho900 => SCOPE_INSTRUCTIONS,
+            Family::Mho900 => MHO_SCOPE_INSTRUCTIONS,
         };
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
@@ -720,6 +857,20 @@ const SCOPE_INSTRUCTIONS: &str = concat!(
     "ceilings RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS (default: the generator's own 10 Vpp / 5 V). ",
     "The built-in signal generator drives real hardware: configuring it and turning its output on ",
     "are separate operations, and settings over the ceilings are refused before they reach the scope. ",
+    "Start with get_screenshot to see the instrument's state, then get_status for exact values. ",
+    "Measurements that the current signal does not support return a null value.",
+);
+
+const MHO_SCOPE_INSTRUCTIONS: &str = concat!(
+    "RIGOL MHO900-series oscilloscope control over SCPI (raw TCP socket). ",
+    "Configure with RIGOL_HOST and RIGOL_FAMILY=mho900. Optional: RIGOL_PORT (default 5555), ",
+    "RIGOL_TIMEOUT_MS (default 5000), RIGOL_ALLOW_WRITES (default false), and signal-generator ",
+    "ceilings RIGOL_GEN_MAX_VPP / RIGOL_GEN_MAX_PEAK_VOLTS for both generator channels or ",
+    "RIGOL_GEN<n>_MAX_VPP / RIGOL_GEN<n>_MAX_PEAK_VOLTS for one (default: the generator's own ",
+    "20 Vpp / 10 V open-circuit). The generator is an option (MHO900-AFG50 or MHO900-AFG100); ",
+    "without it the generator tools are refused. It drives real hardware: configuring a channel ",
+    "and turning its output on are separate operations, and settings whose open-circuit voltage ",
+    "is over the ceilings are refused before they reach the scope. ",
     "Start with get_screenshot to see the instrument's state, then get_status for exact values. ",
     "Measurements that the current signal does not support return a null value.",
 );
@@ -886,21 +1037,160 @@ mod tests {
         );
     }
 
+    /// An MHO900 process offers the same tool names as a DHO one; only the
+    /// generator tools take a channel.
+    #[test]
+    fn an_mho900_server_exposes_the_scope_tools_with_generator_channels() {
+        let mho = RigolServer::router_for(Family::Mho900);
+        assert_eq!(names(&mho), names(&RigolServer::router_for(Family::Dho900)));
+        for tool in sorted_tools(&mho) {
+            let schema = serde_json::to_value(&tool.input_schema).unwrap();
+            let takes_channel = schema["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == "channel"));
+            let generator = tool.name.contains("generator");
+            if generator {
+                assert!(takes_channel, "{} takes no channel", tool.name);
+            }
+        }
+        let clear = mho
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "clear_measurements")
+            .unwrap();
+        assert!(
+            clear
+                .description
+                .is_some_and(|d| d.contains(":MEASure:DELete"))
+        );
+    }
+
+    /// The reported failure: `dho900` pointed at an MHO984.
+    #[tokio::test]
+    async fn a_dho900_server_refuses_an_mho900_and_names_both() {
+        use rigol_fake::{Fake, Reply, step};
+        let fake = Fake::start(vec![step(
+            "*IDN?",
+            Reply::line("RIGOL TECHNOLOGIES,MHO984,MHO9XXXXXXXXXX,00.01.00"),
+        )])
+        .await;
+        let server = RigolServer::for_test(Family::Dho900, fake.addr);
+
+        let err = server
+            .scope()
+            .await
+            .err()
+            .expect("an MHO984 passed as a DHO900");
+
+        assert_eq!(err.code, ErrorCode::INVALID_REQUEST);
+        assert!(err.message.contains("dho900"), "{}", err.message);
+        assert!(err.message.contains("MHO984"), "{}", err.message);
+        fake.finish();
+    }
+
+    #[tokio::test]
+    async fn an_mho900_server_connects_to_an_mho984() {
+        use rigol_fake::{Fake, Reply, step};
+        let fake = Fake::start(vec![step(
+            "*IDN?",
+            Reply::line("RIGOL TECHNOLOGIES,MHO984,MHO9XXXXXXXXXX,00.01.00"),
+        )])
+        .await;
+        let server = RigolServer::for_test(Family::Mho900, fake.addr);
+
+        let scope = server.scope().await.expect("connect");
+
+        assert_eq!(scope.family(), Family::Mho900);
+        assert_eq!(scope.generator_channels(), 2);
+        fake.finish();
+    }
+
+    fn generator_config(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> anyhow::Result<[GeneratorLimits; 2]> {
+        config(vars).map(|s| s.generator_limits)
+    }
+
+    #[test]
+    fn mho900_generator_ceilings_default_to_its_range_and_split_by_channel() {
+        let d =
+            generator_config(&[("RIGOL_HOST", "127.0.0.1"), ("RIGOL_FAMILY", "mho900")]).unwrap();
+        assert_eq!((d[1].max_vpp(), d[1].max_peak_volts()), (20.0, 10.0));
+
+        let l = generator_config(&[
+            ("RIGOL_HOST", "127.0.0.1"),
+            ("RIGOL_FAMILY", "mho900"),
+            ("RIGOL_GEN_MAX_VPP", "12"),
+            ("RIGOL_GEN_MAX_PEAK_VOLTS", "6"),
+            ("RIGOL_GEN2_MAX_VPP", "3.3"),
+            ("RIGOL_GEN2_MAX_PEAK_VOLTS", "1.65"),
+        ])
+        .unwrap();
+        assert_eq!((l[0].max_vpp(), l[0].max_peak_volts()), (12.0, 6.0));
+        assert_eq!((l[1].max_vpp(), l[1].max_peak_volts()), (3.3, 1.65));
+
+        assert!(
+            generator_config(&[
+                ("RIGOL_HOST", "127.0.0.1"),
+                ("RIGOL_FAMILY", "mho900"),
+                ("RIGOL_GEN1_MAX_VPP", "21"),
+                ("RIGOL_GEN1_MAX_PEAK_VOLTS", "5"),
+            ])
+            .is_err()
+        );
+        assert!(
+            generator_config(&[
+                ("RIGOL_HOST", "127.0.0.1"),
+                ("RIGOL_FAMILY", "mho900"),
+                ("RIGOL_GEN2_MAX_VPP", "3.3"),
+            ])
+            .is_err()
+        );
+    }
+
+    /// The DHO keeps its range, and a second-channel ceiling it cannot
+    /// apply stops startup rather than being ignored.
+    #[test]
+    fn dho900_generator_ceilings_keep_their_range() {
+        let d =
+            generator_config(&[("RIGOL_HOST", "127.0.0.1"), ("RIGOL_FAMILY", "dho900")]).unwrap();
+        assert_eq!((d[0].max_vpp(), d[0].max_peak_volts()), (10.0, 5.0));
+        assert!(
+            generator_config(&[
+                ("RIGOL_HOST", "127.0.0.1"),
+                ("RIGOL_FAMILY", "dho900"),
+                ("RIGOL_GEN_MAX_VPP", "20"),
+                ("RIGOL_GEN_MAX_PEAK_VOLTS", "10"),
+            ])
+            .is_err()
+        );
+        let err = generator_config(&[
+            ("RIGOL_HOST", "127.0.0.1"),
+            ("RIGOL_FAMILY", "dho900"),
+            ("RIGOL_GEN2_MAX_VPP", "3.3"),
+            ("RIGOL_GEN2_MAX_PEAK_VOLTS", "1.65"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("mho900"), "{err}");
+    }
+
     /// Nothing that sets a PSU output can be reachable from a scope process.
     #[test]
     fn no_psu_write_is_reachable_from_a_scope_server() {
-        let scope = RigolServer::router_for(Family::Dho900);
-        for tool in [
-            "set_voltage",
-            "set_current",
-            "set_protection",
-            "output_on",
-            "output_off",
-        ] {
-            assert!(
-                !scope.has_route(tool),
-                "{tool} is reachable from the scope router"
-            );
+        for family in [Family::Dho900, Family::Mho900] {
+            let scope = RigolServer::router_for(family);
+            for tool in [
+                "set_voltage",
+                "set_current",
+                "set_protection",
+                "output_on",
+                "output_off",
+            ] {
+                assert!(
+                    !scope.has_route(tool),
+                    "{tool} is reachable from the {family} router"
+                );
+            }
         }
     }
 }

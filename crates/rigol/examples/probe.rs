@@ -55,9 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match identity.family() {
         Some(Family::Dp800) => probe_psu(&host).await,
         Some(Family::Dho900) => {
-            probe_scope(&session, &identity).await?;
+            probe_scope(&session, &identity, SCOPE_QUERIES).await?;
             if write {
                 probe_scope_writes(&session).await?;
+            }
+            Ok(())
+        }
+        Some(Family::Mho900) => {
+            probe_scope(&session, &identity, MHO900_QUERIES).await?;
+            probe_waveform_as_is(&session).await;
+            if write {
+                tracing::warn!("--write is DHO800/DHO900 only; nothing was set on the MHO900");
             }
             Ok(())
         }
@@ -135,6 +143,63 @@ const SCOPE_QUERIES: &[&str] = &[
     ":LA:POD2:THReshold?",
 ];
 
+/// Read-only MHO900 queries, in MHO900 Programming Guide spelling. Every
+/// entry is a query; the signal generator (`:SOURce<n>`) is left out, and
+/// only the option that carries it is asked about.
+const MHO900_QUERIES: &[&str] = &[
+    ":LAN:STATus?",
+    ":LAN:DHCP?",
+    ":LAN:IPADdress?",
+    ":LAN:SMASk?",
+    ":LAN:GATeway?",
+    ":LAN:MAC?",
+    ":TRIGger:STATus?",
+    ":TRIGger:MODE?",
+    ":TRIGger:SWEep?",
+    ":TRIGger:EDGE:SOURce?",
+    ":TRIGger:EDGE:SLOPe?",
+    ":TRIGger:EDGE:LEVel?",
+    ":TIMebase:MAIN:SCALe?",
+    ":TIMebase:MAIN:OFFSet?",
+    ":ACQuire:SRATe?",
+    ":ACQuire:MDEPth?",
+    ":ACQuire:TYPE?",
+    ":ACQuire:BITS?",
+    ":CHANnel1:DISPlay?",
+    ":CHANnel1:SCALe?",
+    ":CHANnel1:OFFSet?",
+    ":CHANnel1:COUPling?",
+    ":CHANnel1:PROBe?",
+    ":CHANnel1:BWLimit?",
+    ":CHANnel1:INVert?",
+    ":CHANnel1:IMPedance?",
+    ":CHANnel4:DISPlay?",
+    ":CHANnel4:IMPedance?",
+    ":MEASure:ITEM? VPP,CHANnel1",
+    ":MEASure:ITEM? FREQuency,CHANnel1",
+    ":MEASure:STATistic:ITEM? CURRent,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? MINimum,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? MAXimum,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? AVERages,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? DEViation,VPP,CHANnel1",
+    ":MEASure:STATistic:ITEM? CNT,VPP,CHANnel1",
+    ":WAVeform:SOURce?",
+    ":WAVeform:MODE?",
+    ":WAVeform:FORMat?",
+    ":WAVeform:POINts?",
+    ":WAVeform:PREamble?",
+    ":LA:ENABle?",
+    ":LA:DIGital:ENABle? D0",
+    ":LA:DIGital:ENABle? D15",
+    ":LA:POD1:DISPlay?",
+    ":LA:POD2:DISPlay?",
+    ":LA:POD1:THReshold?",
+    ":LA:POD2:THReshold?",
+    ":SYSTem:OPTion:STATus? AFG100",
+    ":SYSTem:OPTion:STATus? AFG50",
+    ":SYSTem:OPTion:STATus? BND",
+];
+
 /// One set command to check with `--write`: `query` reads the setting before
 /// and after, `set` changes it, and `restore` followed by the value read
 /// before puts it back. Without a query the command is only sent and the
@@ -188,6 +253,7 @@ const SCOPE_WRITES: &[WriteCheck] = &[
 async fn probe_scope(
     session: &Session,
     identity: &Identity,
+    queries: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         "── {} {} ({}) firmware {} ──",
@@ -200,7 +266,7 @@ async fn probe_scope(
 
     tracing::info!("| Query | Reply | Error queue after |");
     tracing::info!("|---|---|---|");
-    for q in SCOPE_QUERIES {
+    for q in queries {
         let t = Instant::now();
         let reply = match session.query(q).await {
             Ok(r) => format!("`{r}` ({} ms)", t.elapsed().as_millis()),
@@ -223,6 +289,42 @@ async fn probe_scope(
 
     tracing::info!("done — queries only; no setting was changed.");
     Ok(())
+}
+
+/// Reads the waveform the scope is already set up to transfer, without
+/// choosing a source, mode or format: `:WAVeform:PREamble?` then
+/// `:WAVeform:DATA?`, both queries.
+async fn probe_waveform_as_is(session: &Session) {
+    let preamble = match session.query(":WAVeform:PREamble?").await {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::info!("| `:WAVeform:DATA?` | **skipped**: no preamble ({e}) | — |");
+            return;
+        }
+    };
+    let t = Instant::now();
+    match session.query_block(":WAVeform:DATA?").await {
+        Ok(data) => {
+            let decoded = rigol::Preamble::parse(&preamble)
+                .ok_or_else(|| format!("unparsable preamble {preamble:?}"))
+                .and_then(|p| rigol::Waveform::decode(1, p, &data).map_err(|e| e.to_string()));
+            let summary = match decoded.map(|w| w.stats()) {
+                Ok(Some(s)) => format!(
+                    "{} points, min {:.4} V, max {:.4} V, mean {:.4} V",
+                    s.points, s.min, s.max, s.mean
+                ),
+                Ok(None) => "no samples".to_string(),
+                Err(e) => format!("**undecodable**: {e}"),
+            };
+            tracing::info!(
+                "| `:WAVeform:DATA?` | {} bytes; {summary} ({} ms) | {} |",
+                data.len(),
+                t.elapsed().as_millis(),
+                describe_errors(session).await
+            );
+        }
+        Err(e) => tracing::info!("| `:WAVeform:DATA?` | **failed**: {e} | — |"),
+    }
 }
 
 async fn probe_scope_writes(session: &Session) -> Result<(), Box<dyn std::error::Error>> {

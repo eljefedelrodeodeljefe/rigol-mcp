@@ -1,8 +1,14 @@
-//! The DHO800/DHO900-series oscilloscope model.
+//! The DHO800/DHO900-series oscilloscope model, which also drives the
+//! MHO900 series.
 //!
 //! Command spellings follow the RIGOL DHO800/DHO900 Programming Guide and were
 //! checked one by one against a DHO924S on firmware 00.01.05 (see the probe
-//! example). Two things shape this module:
+//! example). The MHO900 Programming Guide uses the same spellings for every
+//! query here; where the two series differ (input impedance, vertical scale
+//! range, probe ratios, the measurement-clear command, a two-channel optional
+//! generator), the model asks its [`Family`]. The MHO900 read paths were
+//! checked against an MHO984 on firmware 00.01.00; its write paths were not.
+//! Two things shape this module:
 //!
 //! - **Parameters are closed enums, never strings.** On this firmware a query
 //!   it does not recognise gets no reply at all, so the only safe command is
@@ -15,10 +21,12 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::error::{Error, Result};
-use crate::generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape, plan};
+use crate::generator::{
+    GeneratorConfig, GeneratorHardware, GeneratorLimits, Signal, Waveshape, plan_on,
+};
 use crate::idn::{Family, Identity};
 use crate::scpi::{DEFAULT_PORT, InstrumentError, Session, SessionConfig};
 
@@ -290,11 +298,73 @@ impl Sweep {
     }
 }
 
-/// Probe attenuation ratios the scope accepts (`:CHANnel<n>:PROBe`).
+/// Probe attenuation ratios a DHO800/DHO900 accepts (`:CHANnel<n>:PROBe`).
 const PROBE_RATIOS: &[f64] = &[
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
     200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0,
 ];
+
+/// Probe ratios an MHO900 accepts: the DHO list plus 15, 150, 1500 and 15000
+/// (MHO900 Programming Guide, `:CHANnel<n>:PROBe`).
+const MHO900_PROBE_RATIOS: &[f64] = &[
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 50.0,
+    100.0, 150.0, 200.0, 500.0, 1000.0, 1500.0, 2000.0, 5000.0, 10000.0, 15000.0, 20000.0, 50000.0,
+];
+
+/// An analog input's impedance (`:CHANnel<n>:IMPedance`, MHO900 only; a
+/// DHO800/DHO900 input is always 1 MΩ).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InputImpedance {
+    /// 1 MΩ (`OMEG`).
+    OneMegohm,
+    /// 50 Ω (`FIFTy`). Rated for 5 Vrms at most.
+    FiftyOhm,
+}
+
+impl InputImpedance {
+    /// Parses `OMEG`, `FIFT` or `FIFTY`, in any case.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "OMEG" => Some(Self::OneMegohm),
+            "FIFT" | "FIFTY" => Some(Self::FiftyOhm),
+            _ => None,
+        }
+    }
+}
+
+/// The load an MHO900 generator channel's amplitude and offset are stated
+/// into (`:SOURce<n>:IMPedance`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorLoad {
+    /// `OMEG`: the settings are the open-circuit voltage.
+    HighZ,
+    /// `FIFTy`: the settings are the voltage across a 50 Ω load; an open
+    /// circuit sees twice as much.
+    FiftyOhm,
+}
+
+impl GeneratorLoad {
+    /// Parses `OMEG`, `FIFT` or `FIFTY`, in any case.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "OMEG" => Some(Self::HighZ),
+            "FIFT" | "FIFTY" => Some(Self::FiftyOhm),
+            _ => None,
+        }
+    }
+
+    /// Open-circuit voltage over the setting.
+    pub fn open_circuit_factor(self) -> f64 {
+        match self {
+            Self::HighZ => 1.0,
+            Self::FiftyOhm => 2.0,
+        }
+    }
+}
 
 /// Changes to one channel's vertical setup. `None` leaves a setting alone.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -353,14 +423,22 @@ pub struct EdgeTrigger {
 /// The signal generator as the scope reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GeneratorState {
+    /// The generator channel, 1 or 2 (MHO900 only; a DHO has one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
     pub output_on: bool,
     /// `None` for an arbitrary waveform, which this crate does not configure.
     pub shape: Option<Waveshape>,
     pub frequency_hz: f64,
     pub amplitude_vpp: f64,
     pub offset_volts: f64,
-    /// Furthest excursion from 0 V the current settings produce.
+    /// Furthest excursion from 0 V the current settings produce. On an
+    /// MHO900 this is the open-circuit figure: twice the settings' own when
+    /// `output_load` is `fifty_ohm`.
     pub peak_volts: Option<f64>,
+    /// The load amplitude and offset are stated into (MHO900 only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_load: Option<GeneratorLoad>,
     /// The ceilings any change or output-on is checked against.
     pub limits: GeneratorLimits,
 }
@@ -379,6 +457,9 @@ pub struct ChannelState {
     pub probe_ratio: f64,
     pub bandwidth_limit: String,
     pub inverted: bool,
+    /// 1 MΩ or 50 Ω (MHO900 only; a DHO input is always 1 MΩ).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_impedance: Option<InputImpedance>,
 }
 
 /// Trigger, timebase and acquisition state, plus every channel.
@@ -596,9 +677,9 @@ impl Waveform {
     }
 }
 
-/// A DHO800/DHO900-series oscilloscope. Signal-generator writes go through
-/// the ceilings in [`GeneratorLimits`]; the SCPI session underneath is not
-/// handed out, because a raw command would go around them:
+/// A DHO800/DHO900 or MHO900-series oscilloscope. Signal-generator writes go
+/// through the ceilings in [`GeneratorLimits`]; the SCPI session underneath
+/// is not handed out, because a raw command would go around them:
 ///
 /// ```compile_fail
 /// async fn bypass(scope: &rigol::Dho900) {
@@ -608,8 +689,14 @@ impl Waveform {
 pub struct Dho900 {
     session: Session,
     identity: Identity,
+    /// [`Family::Dho900`] or [`Family::Mho900`].
+    family: Family,
     channels: u8,
-    generator_limits: GeneratorLimits,
+    /// One per generator channel. A DHO uses the first only.
+    generator_limits: [GeneratorLimits; 2],
+    /// Which generator option an MHO900 carries, once a query has said.
+    /// Only a found option is kept: "not installed" is asked again.
+    mho_generator: OnceCell<GeneratorHardware>,
     /// Held across each generator read-plan-write sequence. The session
     /// serialises single commands only: two configure calls that both read
     /// the state before either writes can each pass the ceilings and still
@@ -618,9 +705,26 @@ pub struct Dho900 {
 }
 
 impl Dho900 {
-    /// Connects and reads identity. Nothing DHO-specific is sent until the
-    /// instrument has identified itself as one.
+    /// Connects to a DHO800/DHO900 and reads identity. Nothing DHO-specific
+    /// is sent until the instrument has identified itself as one.
     pub async fn connect(host: &str, port: Option<u16>, cfg: SessionConfig) -> Result<Self> {
+        Self::connect_as(host, port, cfg, Family::Dho900).await
+    }
+
+    /// Connects to an oscilloscope of `family` ([`Family::Dho900`] or
+    /// [`Family::Mho900`]) and reads identity. An instrument of any other
+    /// family is refused before anything else is sent.
+    pub async fn connect_as(
+        host: &str,
+        port: Option<u16>,
+        cfg: SessionConfig,
+        family: Family,
+    ) -> Result<Self> {
+        if !family.is_scope() {
+            return Err(Error::Conflicting(
+                "this device model drives oscilloscopes only (dho900, mho900)",
+            ));
+        }
         let addr = format!("{host}:{}", port.unwrap_or(DEFAULT_PORT));
         let session = Session::connect(addr, cfg).await?;
 
@@ -629,9 +733,9 @@ impl Dho900 {
             cmd: "*IDN?".into(),
             reply: raw.clone(),
         })?;
-        if identity.family() != Some(Family::Dho900) {
+        if identity.family() != Some(family) {
             return Err(Error::WrongInstrument {
-                expected: Family::Dho900,
+                expected: family,
                 model: identity.model,
             });
         }
@@ -644,27 +748,67 @@ impl Dho900 {
             channels,
             "connected"
         );
+        let limits = GeneratorLimits::hardware(family)?;
         Ok(Self {
             session,
             identity,
+            family,
             channels,
-            generator_limits: GeneratorLimits::default(),
+            generator_limits: [limits; 2],
+            mho_generator: OnceCell::new(),
             operation: Mutex::new(()),
         })
     }
 
-    /// Tightens the signal generator's ceilings below the hardware range.
+    /// Tightens the signal generator's ceilings below the hardware range, on
+    /// every generator channel.
     pub fn with_generator_limits(mut self, limits: GeneratorLimits) -> Self {
-        self.generator_limits = limits;
+        self.generator_limits = [limits; 2];
         self
     }
 
+    /// Tightens one generator channel's ceilings. Channel 2 exists on an
+    /// MHO900 only.
+    pub fn with_generator_channel_limits(
+        mut self,
+        channel: u8,
+        limits: GeneratorLimits,
+    ) -> Result<Self> {
+        let i = self.generator_index(channel)?;
+        self.generator_limits[i] = limits;
+        Ok(self)
+    }
+
+    /// The ceilings on generator channel 1, the only one on a DHO.
     pub fn generator_limits(&self) -> GeneratorLimits {
-        self.generator_limits
+        self.generator_limits[0]
+    }
+
+    /// The ceilings on one generator channel.
+    pub fn generator_channel_limits(&self, channel: u8) -> Result<GeneratorLimits> {
+        Ok(self.generator_limits[self.generator_index(channel)?])
+    }
+
+    /// Generator channels this series has: 1 on a DHO, 2 on an MHO900. An
+    /// MHO900 has them only with option MHO900-AFG50 or MHO900-AFG100.
+    pub fn generator_channels(&self) -> u8 {
+        match self.family {
+            Family::Mho900 => 2,
+            _ => 1,
+        }
     }
 
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// [`Family::Dho900`] or [`Family::Mho900`].
+    pub fn family(&self) -> Family {
+        self.family
+    }
+
+    fn is_mho(&self) -> bool {
+        self.family == Family::Mho900
     }
 
     /// Analog channels on this model.
@@ -703,7 +847,18 @@ impl Dho900 {
             probe_ratio: self.number(&format!("{c}:PROBe?")).await?,
             bandwidth_limit: self.text(&format!("{c}:BWLimit?")).await?,
             inverted: self.flag(&format!("{c}:INVert?")).await?,
+            input_impedance: match self.is_mho() {
+                true => Some(self.input_impedance(channel).await?),
+                false => None,
+            },
         })
+    }
+
+    /// `:CHANnel<n>:IMPedance?`, MHO900 only.
+    async fn input_impedance(&self, channel: u8) -> Result<InputImpedance> {
+        let cmd = format!(":CHANnel{channel}:IMPedance?");
+        let raw = self.text(&cmd).await?;
+        InputImpedance::parse(&raw).ok_or(Error::Parse { cmd, reply: raw })
     }
 
     pub async fn status(&self) -> Result<ScopeStatus> {
@@ -844,10 +999,22 @@ impl Dho900 {
         self.session.command(":AUToset").await
     }
 
-    /// Removes every measurement from the on-screen list
-    /// (`:MEASure:CLEar`), including ones added by [`Dho900::measure`].
+    /// Removes every measurement from the on-screen list, including ones
+    /// added by [`Dho900::measure`]: `:MEASure:CLEar` on a DHO,
+    /// `:MEASure:DELete` on an MHO900, whose guide has no `:MEASure:CLEar`.
     pub async fn clear_measurements(&self) -> Result<()> {
-        self.session.command(":MEASure:CLEar").await
+        self.session
+            .command(self.clear_measurements_command())
+            .await
+    }
+
+    /// The command [`Dho900::clear_measurements`] sends to this series.
+    pub fn clear_measurements_command(&self) -> &'static str {
+        if self.is_mho() {
+            ":MEASure:DELete"
+        } else {
+            ":MEASure:CLEar"
+        }
     }
 
     /// Clears the statistics history of every measurement item and starts
@@ -865,13 +1032,24 @@ impl Dho900 {
         cfg: &ChannelConfig,
     ) -> Result<Applied<ChannelState>> {
         self.check_channel(channel)?;
+        let (ratios, listed) = if self.is_mho() {
+            (
+                MHO900_PROBE_RATIOS,
+                "one of 0.001, 0.002, 0.005 … 1, 2, 5, 10, 15, 20, 50 … 50000",
+            )
+        } else {
+            (
+                PROBE_RATIOS,
+                "one of 0.001, 0.002, 0.005 … 1, 2, 5, 10 … 50000",
+            )
+        };
         if let Some(p) = cfg.probe_ratio
-            && !PROBE_RATIOS.contains(&p)
+            && !ratios.contains(&p)
         {
             return Err(Error::OutOfRange {
                 what: "probe ratio",
                 value: p,
-                allowed: "one of 0.001, 0.002, 0.005 … 1, 2, 5, 10 … 50000".into(),
+                allowed: listed.into(),
             });
         }
         if let Some(scale) = cfg.volts_per_div {
@@ -879,7 +1057,8 @@ impl Dho900 {
                 Some(p) => p,
                 None => self.number(&format!(":CHANnel{channel}:PROBe?")).await?,
             };
-            let (min, max) = (self.min_volts_per_div() * probe, 10.0 * probe);
+            let (min, max) = self.volts_per_div_range(channel).await?;
+            let (min, max) = (min * probe, max * probe);
             if !(min..=max).contains(&scale) {
                 return Err(Error::OutOfRange {
                     what: "vertical scale (V/div)",
@@ -1099,11 +1278,24 @@ impl Dho900 {
     // Unlike everything above, this reaches the device under test. See the
     // generator module for the rules.
 
+    /// Generator channel 1, the only one on a DHO.
     pub async fn generator(&self) -> Result<GeneratorState> {
-        let shape = Waveshape::parse(&self.text(":SOURce:FUNCtion?").await?);
-        let frequency_hz = self.number(":SOURce:FREQuency?").await?;
-        let amplitude_vpp = self.number(":SOURce:VOLTage:AMPLitude?").await?;
-        let offset_volts = self.number(":SOURce:VOLTage:OFFSet?").await?;
+        self.generator_channel(1).await
+    }
+
+    /// One generator channel's state. On an MHO900 without option
+    /// MHO900-AFG50 or MHO900-AFG100 this is refused, not sent.
+    pub async fn generator_channel(&self, channel: u8) -> Result<GeneratorState> {
+        let source = self.generator_source(channel).await?;
+        let shape = Waveshape::parse(&self.text(&source.cmd(":FUNCtion?")).await?);
+        let frequency_hz = self.number(&source.cmd(":FREQuency?")).await?;
+        let amplitude_vpp = self.number(&source.cmd(":VOLTage:AMPLitude?")).await?;
+        let offset_volts = self.number(&source.cmd(":VOLTage:OFFSet?")).await?;
+        let output_load = match self.is_mho() {
+            true => Some(self.generator_load(&source).await?),
+            false => None,
+        };
+        let factor = output_load.map_or(1.0, GeneratorLoad::open_circuit_factor);
         let peak_volts = shape.map(|shape| {
             Signal {
                 shape,
@@ -1111,94 +1303,228 @@ impl Dho900 {
                 amplitude_vpp,
                 offset_volts,
             }
+            .scaled(factor)
             .peak_volts()
         });
         Ok(GeneratorState {
-            output_on: self.flag(":SOURce:OUTPut:STATe?").await?,
+            channel: self.is_mho().then_some(channel),
+            output_on: self.flag(&source.cmd(":OUTPut:STATe?")).await?,
             shape,
             frequency_hz,
             amplitude_vpp,
             offset_volts,
             peak_volts,
-            limits: self.generator_limits,
+            output_load,
+            limits: self.generator_limits[source.index],
         })
+    }
+
+    /// Changes waveform, frequency, amplitude and/or offset of generator
+    /// channel 1, the only one on a DHO.
+    pub async fn configure_generator(
+        &self,
+        cfg: &GeneratorConfig,
+    ) -> Result<Applied<GeneratorState>> {
+        self.configure_generator_channel(1, cfg).await
     }
 
     /// Changes waveform, frequency, amplitude and/or offset. Never turns the
     /// output on. The resulting signal is checked against the ceilings
     /// before anything is sent, and the commands go out in an order that
-    /// keeps every intermediate state inside them too.
-    pub async fn configure_generator(
+    /// keeps every intermediate state inside them too. On an MHO900 the
+    /// check is on the open-circuit voltage: a channel set to a 50 Ω load
+    /// counts twice its settings.
+    pub async fn configure_generator_channel(
         &self,
+        channel: u8,
         cfg: &GeneratorConfig,
     ) -> Result<Applied<GeneratorState>> {
         let _operation = self.operation.lock().await;
-        let current = self.current_signal().await?;
+        let source = self.generator_source(channel).await?;
+        let factor = self.open_circuit_factor(&source).await?;
+        let current = self.current_signal(&source).await?;
         let target = cfg.apply_to(&current);
-        let changes = plan(&current, &target, &self.generator_limits)?;
+        let changes = plan_on(
+            source.hardware,
+            &current.scaled(factor),
+            &target.scaled(factor),
+            &self.generator_limits[source.index],
+        )?;
 
         tracing::info!(
             op = "configure_generator",
+            channel,
             shape = ?target.shape,
             frequency_hz = target.frequency_hz,
             amplitude_vpp = target.amplitude_vpp,
             offset_volts = target.offset_volts,
-            peak_volts = target.peak_volts(),
+            peak_volts = target.scaled(factor).peak_volts(),
             "configuring signal generator"
         );
         self.session.clear_status().await?;
         for change in &changes {
-            self.session.command(&change.scpi()).await?;
+            self.session
+                .command(&change.divided(factor).scpi_on(&source.prefix))
+                .await?;
         }
         Ok(Applied {
-            state: self.generator().await?,
+            state: self.generator_channel(channel).await?,
             instrument_errors: self.errors().await?,
         })
     }
 
-    /// Turns the output on, after checking the settings it would put out.
-    /// They may have changed on the front panel since they were configured.
+    /// Turns generator channel 1 on, the only one on a DHO.
     pub async fn generator_output_on(&self) -> Result<GeneratorState> {
+        self.generator_channel_output_on(1).await
+    }
+
+    /// Turns the output on, after checking the settings it would put out.
+    /// They may have changed on the front panel since they were configured,
+    /// and so may an MHO900 channel's load setting.
+    pub async fn generator_channel_output_on(&self, channel: u8) -> Result<GeneratorState> {
         let _operation = self.operation.lock().await;
-        let current = self.current_signal().await?;
-        self.generator_limits.check(&current)?;
+        let source = self.generator_source(channel).await?;
+        let factor = self.open_circuit_factor(&source).await?;
+        let current = self.current_signal(&source).await?;
+        self.generator_limits[source.index].check(&current.scaled(factor))?;
         // Logged before the command, so an energisation whose read-back
         // fails still leaves its line.
         tracing::info!(
             op = "generator_output_on",
+            channel,
             shape = ?current.shape,
             frequency_hz = current.frequency_hz,
             amplitude_vpp = current.amplitude_vpp,
             offset_volts = current.offset_volts,
-            peak_volts = current.peak_volts(),
+            peak_volts = current.scaled(factor).peak_volts(),
             "signal generator output ON"
         );
-        self.session.command(":SOURce:OUTPut:STATe ON").await?;
-        self.generator().await
+        self.session
+            .command(&source.cmd(":OUTPut:STATe ON"))
+            .await?;
+        self.generator_channel(channel).await
     }
 
+    /// Turns generator channel 1 off, the only one on a DHO.
     pub async fn generator_output_off(&self) -> Result<GeneratorState> {
-        let _operation = self.operation.lock().await;
-        tracing::info!(op = "generator_output_off", "signal generator output off");
-        self.session.command(":SOURce:OUTPut:STATe OFF").await?;
-        self.generator().await
+        self.generator_channel_output_off(1).await
     }
 
-    /// The generator's signal now. An arbitrary waveform cannot be checked
-    /// against the ceilings, so it is refused rather than guessed at.
-    async fn current_signal(&self) -> Result<Signal> {
-        let cmd = ":SOURce:FUNCtion?";
-        let raw = self.text(cmd).await?;
+    pub async fn generator_channel_output_off(&self, channel: u8) -> Result<GeneratorState> {
+        let _operation = self.operation.lock().await;
+        let source = self.generator_source(channel).await?;
+        tracing::info!(
+            op = "generator_output_off",
+            channel,
+            "signal generator output off"
+        );
+        self.session
+            .command(&source.cmd(":OUTPut:STATe OFF"))
+            .await?;
+        self.generator_channel(channel).await
+    }
+
+    /// The generator's signal now, as set. An arbitrary waveform cannot be
+    /// checked against the ceilings, so it is refused rather than guessed
+    /// at.
+    async fn current_signal(&self, source: &GeneratorSource) -> Result<Signal> {
+        let cmd = source.cmd(":FUNCtion?");
+        let raw = self.text(&cmd).await?;
         let shape = Waveshape::parse(&raw).ok_or_else(|| Error::Parse {
-            cmd: cmd.into(),
+            cmd: cmd.clone(),
             reply: raw,
         })?;
         Ok(Signal {
             shape,
-            frequency_hz: self.number(":SOURce:FREQuency?").await?,
-            amplitude_vpp: self.number(":SOURce:VOLTage:AMPLitude?").await?,
-            offset_volts: self.number(":SOURce:VOLTage:OFFSet?").await?,
+            frequency_hz: self.number(&source.cmd(":FREQuency?")).await?,
+            amplitude_vpp: self.number(&source.cmd(":VOLTage:AMPLitude?")).await?,
+            offset_volts: self.number(&source.cmd(":VOLTage:OFFSet?")).await?,
         })
+    }
+
+    fn generator_index(&self, channel: u8) -> Result<usize> {
+        let count = self.generator_channels();
+        if (1..=count).contains(&channel) {
+            Ok(usize::from(channel - 1))
+        } else {
+            Err(Error::NoSuchInput { channel, count })
+        }
+    }
+
+    /// Where a generator channel's commands go, and the hardware behind it.
+    /// On an MHO900 this first confirms the generator option is installed.
+    async fn generator_source(&self, channel: u8) -> Result<GeneratorSource> {
+        let index = self.generator_index(channel)?;
+        if !self.is_mho() {
+            return Ok(GeneratorSource {
+                prefix: ":SOURce".into(),
+                index,
+                hardware: GeneratorHardware::Dho900,
+            });
+        }
+        let hardware = *self
+            .mho_generator
+            .get_or_try_init(|| self.mho_generator_option())
+            .await?;
+        Ok(GeneratorSource {
+            prefix: format!(":SOURce{channel}"),
+            index,
+            hardware,
+        })
+    }
+
+    /// Which generator option an MHO900 has (`:SYSTem:OPTion:STATus?`).
+    /// BND, the function bundle, includes AFG100. Verified on an MHO984
+    /// (00.01.00): each of the three answers `0` on a unit without them.
+    async fn mho_generator_option(&self) -> Result<GeneratorHardware> {
+        for (option, hardware) in [
+            ("AFG100", GeneratorHardware::Mho900Afg100),
+            ("BND", GeneratorHardware::Mho900Afg100),
+            ("AFG50", GeneratorHardware::Mho900Afg50),
+        ] {
+            if self
+                .flag(&format!(":SYSTem:OPTion:STATus? {option}"))
+                .await?
+            {
+                return Ok(hardware);
+            }
+        }
+        Err(Error::NotOnThisModel {
+            what: "the signal generator (no MHO900-AFG50 or MHO900-AFG100 option)",
+            model: self.identity.model.clone(),
+        })
+    }
+
+    /// `:SOURce<n>:IMPedance?`, MHO900 only.
+    async fn generator_load(&self, source: &GeneratorSource) -> Result<GeneratorLoad> {
+        let cmd = source.cmd(":IMPedance?");
+        let raw = self.text(&cmd).await?;
+        GeneratorLoad::parse(&raw).ok_or(Error::Parse { cmd, reply: raw })
+    }
+
+    /// What the open-circuit voltage is over the settings: 1 on a DHO and
+    /// an MHO900 channel set to HighZ, 2 on one set to a 50 Ω load.
+    async fn open_circuit_factor(&self, source: &GeneratorSource) -> Result<f64> {
+        if self.is_mho() {
+            Ok(self.generator_load(source).await?.open_circuit_factor())
+        } else {
+            Ok(1.0)
+        }
+    }
+
+    /// The vertical scale range at a 1x probe, in V/div. DHO900: 200 µV to
+    /// 10 V; DHO800: 500 µV to 10 V (Programming Guide, `:CHANnel<n>:SCALe`).
+    /// MHO900: 1 mV to 10 V at 1 MΩ, 200 µV to 1 V at 50 Ω (MHO900
+    /// Programming Guide, `:CHANnel<n>:SCALe`), so its impedance is read.
+    async fn volts_per_div_range(&self, channel: u8) -> Result<(f64, f64)> {
+        if self.is_mho() {
+            Ok(match self.input_impedance(channel).await? {
+                InputImpedance::OneMegohm => (1e-3, 10.0),
+                InputImpedance::FiftyOhm => (200e-6, 1.0),
+            })
+        } else {
+            Ok((self.min_volts_per_div(), 10.0))
+        }
     }
 
     /// Smallest vertical scale at a 1x probe: 200 µV/div on the DHO900
@@ -1211,10 +1537,10 @@ impl Dho900 {
         }
     }
 
-    /// Digital channels and the logic analyser exist on the DHO900 series
-    /// only (Programming Guide, `:LA` commands).
+    /// Digital channels and the logic analyser exist on the DHO900 and
+    /// MHO900 series, not the DHO800 (Programming Guides, `:LA` commands).
     fn check_digital(&self) -> Result<()> {
-        if self.identity.model.to_ascii_uppercase().starts_with("DHO9") {
+        if self.is_mho() || self.identity.model.to_ascii_uppercase().starts_with("DHO9") {
             Ok(())
         } else {
             Err(Error::NotOnThisModel {
@@ -1257,6 +1583,21 @@ impl Dho900 {
     }
 }
 
+/// A generator channel's command prefix and the hardware behind it.
+struct GeneratorSource {
+    /// `:SOURce` on a DHO, `:SOURce<n>` on an MHO900.
+    prefix: String,
+    /// Into the per-channel ceilings.
+    index: usize,
+    hardware: GeneratorHardware,
+}
+
+impl GeneratorSource {
+    fn cmd(&self, rest: &str) -> String {
+        format!("{}{rest}", self.prefix)
+    }
+}
+
 fn check_finite(what: &'static str, value: Option<f64>) -> Result<()> {
     match value {
         Some(v) if !v.is_finite() => Err(Error::OutOfRange {
@@ -1276,7 +1617,8 @@ fn parse_number(cmd: &str, raw: &str) -> Result<f64> {
 }
 
 /// Analog channels from the model name: the last digit of the series number
-/// (DHO802 → 2, DHO924S → 4). Falls back to 2, the smallest in the series.
+/// (DHO802 → 2, DHO924S → 4, MHO984 → 4). Falls back to 2, the smallest in
+/// the DHO series.
 fn channel_count(model: &str) -> u8 {
     model
         .trim_end_matches(|c: char| c.is_ascii_alphabetic())
@@ -1295,8 +1637,61 @@ mod tests {
     /// Captured from a DHO924S (00.01.05), channel 1, grounded input.
     const PREAMBLE: &str = "1,0,1000,1,5.000000E-7,-2.500000E-4,0.000000,6.6667E-06,-7800,32768";
 
+    /// Captured from an MHO984 (00.01.00), channel 1, the 1 kHz probe
+    /// compensation signal.
+    const MHO_PREAMBLE: &str =
+        "1,0,1000,1,2.000000E-6,-1.000000E-3,0.000000,6.6667E-06,-23347,32768";
+
+    #[test]
+    fn parses_an_mho900_preamble_like_a_dho_one() {
+        let p = Preamble::parse(MHO_PREAMBLE).unwrap();
+        assert_eq!((p.format, p.points), (1, 1000));
+        assert_eq!(p.x_increment, 2.0e-6);
+        assert_eq!(p.seconds(0), -1.0e-3);
+        // 0 V sits at yreference + yorigin: 32768 - 23347 = 9421.
+        assert!(p.volts(9421).abs() < 1e-9);
+        // 6.6667 µV per code is 50 mV/div over 7500 codes, as on the DHO.
+        assert!((p.volts(9421 + 7500) - 0.05).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parses_input_impedance_and_generator_load() {
+        assert_eq!(
+            InputImpedance::parse("OMEG"),
+            Some(InputImpedance::OneMegohm)
+        );
+        assert_eq!(
+            InputImpedance::parse("FIFT\n"),
+            Some(InputImpedance::FiftyOhm)
+        );
+        assert_eq!(
+            InputImpedance::parse("fifty"),
+            Some(InputImpedance::FiftyOhm)
+        );
+        assert_eq!(InputImpedance::parse("75"), None);
+        assert_eq!(GeneratorLoad::parse("FIFTy"), Some(GeneratorLoad::FiftyOhm));
+        assert_eq!(
+            GeneratorLoad::parse("OMEG").map(GeneratorLoad::open_circuit_factor),
+            Some(1.0)
+        );
+        assert_eq!(GeneratorLoad::FiftyOhm.open_circuit_factor(), 2.0);
+        assert_eq!(GeneratorLoad::parse(""), None);
+    }
+
+    #[test]
+    fn mho900_probe_ratios_extend_the_dho_list() {
+        for p in PROBE_RATIOS {
+            assert!(MHO900_PROBE_RATIOS.contains(p), "{p}");
+        }
+        for p in [15.0, 150.0, 1500.0, 15000.0] {
+            assert!(MHO900_PROBE_RATIOS.contains(&p) && !PROBE_RATIOS.contains(&p));
+        }
+    }
+
     #[test]
     fn counts_channels_from_the_model() {
+        assert_eq!(channel_count("MHO984"), 4);
+        assert_eq!(channel_count("MHO934"), 4);
         assert_eq!(channel_count("DHO924S"), 4);
         assert_eq!(channel_count("DHO914"), 4);
         assert_eq!(channel_count("DHO802"), 2);
