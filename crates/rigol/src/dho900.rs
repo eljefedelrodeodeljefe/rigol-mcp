@@ -46,7 +46,7 @@ const WAVEFORM_TIMEOUT: Duration = Duration::from_secs(30);
 /// Points per `:WAVeform:DATA?` block in a memory read unless the caller
 /// says: 2 MB of WORD data. The Programming Guides (3.28) set no limit per
 /// block beyond the memory depth; this keeps each block well inside
-/// [`WAVEFORM_TIMEOUT`] and the session's block cap.
+/// the 30 s block-read timeout and the session's block cap.
 pub const DEFAULT_MEMORY_CHUNK_POINTS: usize = 1_000_000;
 
 /// Most points per block in a memory read: 20 MB of WORD data, under the
