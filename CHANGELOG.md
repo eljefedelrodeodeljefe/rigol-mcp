@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.5.0...v0.6.0) (2026-11-25)
+
+
+### Features
+
+* drive MHO900-series oscilloscopes (RIGOL_FAMILY=mho900) ([a38d270](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/a38d27086b21cde4e2d719882dc14397bdc61ad7))
+* drive MHO900-series oscilloscopes (RIGOL_FAMILY=mho900) ([2e8bb5a](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/2e8bb5a1b66e3e978d6b11c814bfc53fe5453072))
+
+
+### Documentation
+
+* MHO900 support, its verified queries and where it differs ([4dfdcba](https://github.com/eljefedelrodeodeljefe/rigol-mcp/commit/4dfdcbae32225b0a0d324fe813f381743db8ea3d))
+
 ## [0.5.0](https://github.com/eljefedelrodeodeljefe/rigol-mcp/compare/v0.4.0...v0.5.0) (2026-11-18)
 
 
