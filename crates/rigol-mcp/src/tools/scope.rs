@@ -83,7 +83,7 @@ pub async fn autoset(scope: &Dho900) -> Result<Value> {
 
 pub async fn clear_measurements(scope: &Dho900) -> Result<Value> {
     scope.clear_measurements().await?;
-    Ok(json!({ "sent": ":MEASure:CLEar" }))
+    Ok(json!({ "sent": scope.clear_measurements_command() }))
 }
 
 pub async fn reset_measurement_statistics(scope: &Dho900) -> Result<Value> {
@@ -174,4 +174,45 @@ pub async fn generator_output_on(scope: &Dho900) -> Result<Value> {
 
 pub async fn generator_output_off(scope: &Dho900) -> Result<Value> {
     Ok(serde_json::to_value(scope.generator_output_off().await?)?)
+}
+
+// ── MHO900 signal generator: two channels, optional ──────────────────────────
+
+pub async fn generator_channel(scope: &Dho900, p: &GeneratorChannelParams) -> Result<Value> {
+    Ok(serde_json::to_value(
+        scope.generator_channel(p.channel).await?,
+    )?)
+}
+
+pub async fn configure_generator_channel(
+    scope: &Dho900,
+    p: &ConfigureGeneratorChannelParams,
+) -> Result<Value> {
+    let cfg = GeneratorConfig {
+        shape: p.shape,
+        frequency_hz: p.frequency_hz,
+        amplitude_vpp: p.amplitude_vpp,
+        offset_volts: p.offset_volts,
+    };
+    Ok(serde_json::to_value(
+        scope.configure_generator_channel(p.channel, &cfg).await?,
+    )?)
+}
+
+pub async fn generator_channel_output_on(
+    scope: &Dho900,
+    p: &GeneratorChannelParams,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        scope.generator_channel_output_on(p.channel).await?,
+    )?)
+}
+
+pub async fn generator_channel_output_off(
+    scope: &Dho900,
+    p: &GeneratorChannelParams,
+) -> Result<Value> {
+    Ok(serde_json::to_value(
+        scope.generator_channel_output_off(p.channel).await?,
+    )?)
 }

@@ -10,7 +10,8 @@
 //!   validating constructors.
 //! - [`dp800::Dp800`] and [`dho900::Dho900`] — the typed device models. They
 //!   keep their session private, so nothing that drives an instrument through
-//!   one can bypass its ceilings.
+//!   one can bypass its ceilings. `Dho900` also drives the MHO900 series,
+//!   through [`dho900::Dho900::connect_as`] with [`idn::Family::Mho900`].
 //!
 //! Deliberately not VXI-11: the instrument exposes ONC-RPC portmap on tcp/111,
 //! but the raw socket is a line protocol with identical capability and none of
@@ -26,15 +27,15 @@ pub mod scpi;
 
 pub use dho900::{
     Applied, Bucket, ChannelConfig, ChannelState, Coupling, Dho900, DigitalChannel, EdgeTrigger,
-    EdgeTriggerConfig, GeneratorState, LA_THRESHOLD_LIMIT_VOLTS, LogicAnalyzer,
-    LogicAnalyzerConfig, MeasureItem, MeasureStatistics, Preamble, Reading, ScopeLan, ScopeStatus,
-    Slope, Sweep, Timebase, Waveform, WaveformStats,
+    EdgeTriggerConfig, GeneratorLoad, GeneratorState, InputImpedance, LA_THRESHOLD_LIMIT_VOLTS,
+    LogicAnalyzer, LogicAnalyzerConfig, MeasureItem, MeasureStatistics, Preamble, Reading,
+    ScopeLan, ScopeStatus, Slope, Sweep, Timebase, Waveform, WaveformStats,
 };
 pub use dp800::{
     Channel, DP800_COMMAND_SETTLE, Dp800, LanConfig, Measurement, OutputState, Protection, Rating,
 };
 pub use error::{Error, Result};
-pub use generator::{GeneratorConfig, GeneratorLimits, Signal, Waveshape};
+pub use generator::{GeneratorConfig, GeneratorHardware, GeneratorLimits, Signal, Waveshape};
 pub use idn::{Family, Identity};
 pub use limits::Limits;
 pub use scpi::{

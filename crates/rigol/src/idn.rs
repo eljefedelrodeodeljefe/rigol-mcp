@@ -45,6 +45,9 @@ pub enum Family {
     Dp800,
     /// DHO800 and DHO900-series oscilloscopes (DHO802 … DHO924S).
     Dho900,
+    /// MHO900-series oscilloscopes (MHO934, MHO954, MHO984). They share most
+    /// of the DHO900 command set and are driven by the same device model.
+    Mho900,
 }
 
 impl Family {
@@ -55,6 +58,8 @@ impl Family {
             Some(Self::Dp800)
         } else if m.starts_with("DHO8") || m.starts_with("DHO9") {
             Some(Self::Dho900)
+        } else if is_mho900(&m) {
+            Some(Self::Mho900)
         } else {
             None
         }
@@ -64,8 +69,22 @@ impl Family {
         match self {
             Self::Dp800 => "dp800",
             Self::Dho900 => "dho900",
+            Self::Mho900 => "mho900",
         }
     }
+
+    /// Whether this family is an oscilloscope.
+    pub fn is_scope(self) -> bool {
+        matches!(self, Self::Dho900 | Self::Mho900)
+    }
+}
+
+/// MHO934, MHO954 and MHO984: `MHO9`, a bandwidth digit, then the channel
+/// count 4 (MHO900 Programming Guide, Document Overview). The MHO98, a
+/// separate model with its own Programming Guide, does not match.
+fn is_mho900(model: &str) -> bool {
+    let b = model.as_bytes();
+    b.len() >= 6 && b.starts_with(b"MHO9") && b[4].is_ascii_digit() && b[5] == b'4'
 }
 
 impl fmt::Display for Family {
@@ -81,8 +100,9 @@ impl FromStr for Family {
         match s.trim().to_ascii_lowercase().as_str() {
             "dp800" => Ok(Self::Dp800),
             "dho900" | "dho800" => Ok(Self::Dho900),
+            "mho900" => Ok(Self::Mho900),
             other => Err(format!(
-                "unknown instrument family `{other}` (expected dp800 or dho900)"
+                "unknown instrument family `{other}` (expected dp800, dho900 or mho900)"
             )),
         }
     }
@@ -107,8 +127,17 @@ mod tests {
     }
 
     #[test]
+    fn classifies_mho900_oscilloscopes() {
+        for model in ["MHO984", "MHO954", "MHO934", "mho984"] {
+            assert_eq!(Family::from_model(model), Some(Family::Mho900), "{model}");
+        }
+    }
+
+    #[test]
     fn leaves_unknown_models_unclassified() {
-        for model in ["DS1054Z", "MSO5074", "DL3021", "DP711", ""] {
+        for model in [
+            "DS1054Z", "MSO5074", "DL3021", "DP711", "MHO98", "MHO5000", "",
+        ] {
             assert_eq!(Family::from_model(model), None, "{model}");
         }
     }
@@ -117,12 +146,15 @@ mod tests {
     fn identity_reports_its_family() {
         let idn = Identity::parse("RIGOL TECHNOLOGIES,DHO924S,DHO9S000000001,00.01.05").unwrap();
         assert_eq!(idn.family(), Some(Family::Dho900));
+        let idn = Identity::parse("RIGOL TECHNOLOGIES,MHO984,MHO9XXXXXXXXXX,00.01.00").unwrap();
+        assert_eq!(idn.family(), Some(Family::Mho900));
     }
 
     #[test]
     fn parses_family_names() {
         assert_eq!("dp800".parse(), Ok(Family::Dp800));
         assert_eq!("DHO900".parse(), Ok(Family::Dho900));
+        assert_eq!("mho900".parse(), Ok(Family::Mho900));
         assert!("ds1000z".parse::<Family>().is_err());
     }
 }

@@ -9,7 +9,9 @@ pub const MAX_WAVEFORM_POINTS: usize = 10_000;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeasureParams {
-    #[schemars(description = "What to measure, in DHO800/DHO900 Programming Guide terms")]
+    #[schemars(
+        description = "What to measure, in DHO800/DHO900 and MHO900 Programming Guide terms"
+    )]
     pub item: MeasureItem,
     #[schemars(description = "Analog input channel, from 1 to the model's channel count")]
     pub channel: u8,
@@ -32,7 +34,7 @@ pub struct ConfigureChannelParams {
     #[schemars(description = "Show or hide the channel (:CHANnel<n>:DISPlay)")]
     pub displayed: Option<bool>,
     #[schemars(
-        description = "Vertical scale in volts per division (:CHANnel<n>:SCALe). 200 µV to 10 V at a 1x probe on a DHO900 (500 µV on a DHO800), multiplied by the probe ratio"
+        description = "Vertical scale in volts per division (:CHANnel<n>:SCALe). At a 1x probe: 200 µV to 10 V on a DHO900, 500 µV to 10 V on a DHO800, and on an MHO900 1 mV to 10 V at 1 MΩ input or 200 µV to 1 V at 50 Ω. Multiplied by the probe ratio"
     )]
     pub volts_per_div: Option<f64>,
     #[schemars(
@@ -42,7 +44,7 @@ pub struct ConfigureChannelParams {
     #[schemars(description = "Input coupling (:CHANnel<n>:COUPling)")]
     pub coupling: Option<Coupling>,
     #[schemars(
-        description = "Probe attenuation ratio (:CHANnel<n>:PROBe), e.g. 1 or 10. Must be one of 0.001, 0.002, 0.005 … 1, 2, 5, 10, 20, 50 … 50000. Applied before scale and offset, which it rescales"
+        description = "Probe attenuation ratio (:CHANnel<n>:PROBe), e.g. 1 or 10. Must be one of 0.001, 0.002, 0.005 … 1, 2, 5, 10, 20, 50 … 50000; an MHO900 also takes 15, 150, 1500 and 15000. Applied before scale and offset, which it rescales"
     )]
     pub probe_ratio: Option<f64>,
 }
@@ -115,4 +117,36 @@ pub struct ConfigureLogicAnalyzerParams {
         description = "Logic threshold for D8–D15 in volts (:LA:POD2:THReshold), -15 to 15"
     )]
     pub pod2_threshold_volts: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GeneratorChannelParams {
+    #[schemars(
+        description = "Generator channel, 1 or 2 (:SOURce<n>). Needs option MHO900-AFG50 or MHO900-AFG100"
+    )]
+    pub channel: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigureGeneratorChannelParams {
+    #[schemars(
+        description = "Generator channel, 1 or 2 (:SOURce<n>). Needs option MHO900-AFG50 or MHO900-AFG100"
+    )]
+    pub channel: u8,
+    #[schemars(
+        description = "Waveform (:SOURce<n>:FUNCtion). dc outputs the offset as a constant level"
+    )]
+    pub shape: Option<Waveshape>,
+    #[schemars(
+        description = "Frequency in hertz (:SOURce<n>:FREQuency). AFG100: sine 2 mHz–100 MHz, square 2 mHz–20 MHz, ramp 2 mHz–2 MHz. AFG50: sine 20 mHz–50 MHz, square 20 mHz–10 MHz, ramp 20 mHz–1 MHz. Not used by dc or noise"
+    )]
+    pub frequency_hz: Option<f64>,
+    #[schemars(
+        description = "Amplitude in volts peak-to-peak (:SOURce<n>:VOLTage:AMPLitude), into the load the channel's output impedance names: HighZ 2 mV–20 V, or 1 mV–10 V into 50 Ω, halved above 50 MHz. Set to 50 Ω, an open circuit sees twice this, and that is what RIGOL_GEN<n>_MAX_VPP bounds"
+    )]
+    pub amplitude_vpp: Option<f64>,
+    #[schemars(
+        description = "DC offset in volts (:SOURce<n>:VOLTage:OFFSet), into the same load as the amplitude. The open-circuit |offset| + amplitude/2 must stay within RIGOL_GEN<n>_MAX_PEAK_VOLTS"
+    )]
+    pub offset_volts: Option<f64>,
 }
