@@ -20,7 +20,7 @@ crates/rigol/          library — no MCP types cross into here
   src/scpi.rs          transport: framing, timeouts, blocks, poison-and-reconnect, error queue
   src/idn.rs           *IDN? identity and the instrument Family it implies
   src/dp800.rs         DP800 power supply model
-  src/dho900.rs        DHO800/DHO900 oscilloscope model
+  src/dho900.rs        DHO800/DHO900 and MHO900 oscilloscope model
   src/limits.rs        PSU safety ceilings
   src/generator.rs     scope signal-generator ceilings and safe command ordering
   src/error.rs         typed errors
@@ -49,10 +49,11 @@ Add a tool in this order:
 2. Pure logic in `crates/rigol-mcp/src/tools/{domain}.rs` returning `anyhow::Result<Value>`.
    No MCP types here.
 3. A `#[tool(description = "…")]` stub in `server.rs`, on the router for its family
-   (`psu_router` or `scope_router`), that calls `self.guard_write()?` first if it mutates
-   anything.
+   (`psu_router`; `scope_router` for both scope families, or `dho_scope_router` /
+   `mho_scope_router` where their commands differ), that calls `self.guard_write()?` first
+   if it mutates anything.
 
-Tool descriptions mirror the **RIGOL DP800** and **DHO800/DHO900 Programming Guide**
+Tool descriptions mirror the **RIGOL DP800**, **DHO800/DHO900** and **MHO900 Programming Guide**
 terminology, the way `mikrotik-mcp` mirrors the MikroTik wiki. Name the SCPI command in the
 description.
 
@@ -70,7 +71,10 @@ these rules:
   tool layer. Do not add a parameter that relaxes them.
 - Generator ceilings bound each value and the peak, `|offset| + amplitude/2`. Keep
   `generator::plan` ordering commands so every intermediate state stays inside them, and
-  keep its exhaustive test.
+  keep its exhaustive tests.
+- On an MHO900, generator ceilings bound the open-circuit voltage: a channel set to a 50 Ω
+  load counts twice its settings. Read the load setting at every check, since it can change
+  on the front panel.
 - Never make a setpoint or generator configuration write energise an output as a side
   effect.
 - Every write logs one info line with its operation, channel and values; every `output_on`

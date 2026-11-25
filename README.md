@@ -9,8 +9,8 @@
 safety limits enforced in the library, below the MCP layer.**
 
 A Rust SDK and an [MCP](https://modelcontextprotocol.io) server. Point Claude Code, Cursor or
-any MCP client at a DP800 power supply and a DHO800/DHO900 oscilloscope, and ask it to power a
-rail and catch the rise on the scope.
+any MCP client at a DP800 power supply and a DHO800/DHO900 or MHO900 oscilloscope, and ask it
+to power a rail and catch the rise on the scope.
 
 ![A DHO924S screen, returned to the agent by get_screenshot](docs/get_screenshot.png)
 
@@ -22,6 +22,12 @@ rail and catch the rise on the scope.
 |---|---|---|
 | `dp800` (default) | DP811, DP821, DP831, DP832, DP832A | DP832A, firmware `00.01.19` |
 | `dho900` | DHO802, DHO804, DHO812, DHO814, DHO914(S), DHO924(S) | DHO924S, firmware `00.01.05` |
+| `mho900` | MHO934, MHO954, MHO984 | MHO984, firmware `00.01.00`: read paths only (see below) |
+
+On the MHO900, every read tool has been run against an MHO984. The write tools and the signal
+generator have **not** been run on hardware: their commands come from the MHO900 Programming
+Guide, and the test unit has no generator option. The MHO98 has its own Programming Guide and
+is not covered.
 
 One process drives one instrument. A PSU and a scope are two server entries, each with its own
 address and its own write gate. A scope can be writable while the PSU stays read-only, and a
@@ -37,16 +43,25 @@ design follows from that:
    - PSU: per channel, volts and amps.
    - Scope signal generator: amplitude, and the **peak** `|offset| + amplitude/2` that
      reaches the device under test. Each can be in range while the
-     pair is not.
+     pair is not. On an MHO900 each of the two generator channels has its own ceilings.
 2. **Every ceiling has a finite default.** Unconfigured, it is what the hardware can do:
    the channel's own rating on a PSU (30V/3A, 30V/3A, 5V/3A on a DP832A), the generator's own
-   10 Vpp / 5 V peak on a scope.
+   10 Vpp / 5 V peak on a DHO, and 20 Vpp / 10 V peak on an MHO900.
 3. **Configuring and energising are separate operations.** Setting a voltage never turns a
    PSU output on; configuring the generator never turns its output on. Every energisation is
    explicit and logged, and both the PSU and the generator re-check their settings at
    output-on, in case they were changed on the front panel. When the generator output is
    already on, settings change in an order that keeps every intermediate state inside the
    ceilings too.
+
+**On an MHO900 the generator ceilings bound the open-circuit voltage.** An MHO900 states
+amplitude and offset into the load its output impedance is set to (`:SOURce<n>:IMPedance`).
+Set to 50 Ω, a 5 Vpp setting is 5 Vpp across a 50 Ω termination but 10 Vpp across an
+unterminated input, and the generator has no way to know which is connected. The library
+reads the impedance setting before every configure and output-on, doubles a 50 Ω setting,
+and checks that against the ceilings. The default, 20 Vpp / 10 V, is the hardware's HighZ
+range, the most either setting can put on an open circuit. A ceiling of 3.3 V peak then means
+3.3 V at the device under test, terminated or not.
 
 A refused value comes back as an MCP *invalid params* error. That code tells the model to
 change the arguments, so it lowers the value instead of retrying the same call.
@@ -143,23 +158,27 @@ PSU too.
 | `set_protection` | OVP/OCP trip levels and on/off; levels first, warns when an armed level is above the ceiling | writes |
 | `output_on` / `output_off` | Energise or de-energise a channel | writes |
 
-### Oscilloscope (`RIGOL_FAMILY=dho900`)
+### Oscilloscope (`RIGOL_FAMILY=dho900` or `mho900`)
+
+Both scope families have the same tools. On an MHO900 the four generator tools take a
+`channel` (1 or 2, `:SOURce<n>`), and are refused when the scope has neither the
+MHO900-AFG50 nor the MHO900-AFG100 option (`:SYSTem:OPTion:STATus?`).
 
 | Tool | What it does | Gate |
 |---|---|---|
 | `get_screenshot` | The screen, as an image (`:DISPlay:DATA? PNG`) | — |
-| `get_status` | Trigger, timebase, acquisition, every channel | — |
+| `get_status` | Trigger, timebase, acquisition, every channel (and its input impedance on an MHO900) | — |
 | `measure` | One automatic measurement (`:MEASure:ITEM?`); `null` when unmeasurable | — |
 | `measure_statistics` | Current/min/max/average/deviation/count for one measurement (`:MEASure:STATistic:ITEM?`) | — |
 | `get_waveform` | A trace in volts/seconds, thinned to min/max buckets, with full-capture stats | — |
 | `get_identity` / `get_lan_config` / `get_instrument_errors` | Identity (with channel count), LAN, error queue | — |
 | `get_generator` | Signal generator state and its ceilings | — |
-| `get_logic_analyzer` | Logic analyser on/off, pod thresholds, which of D0–D15 are shown (DHO900) | — |
+| `get_logic_analyzer` | Logic analyser on/off, pod thresholds, which of D0–D15 are shown (DHO900, MHO900) | — |
 | `run` / `stop` / `single` / `autoset` | Acquisition control | writes |
 | `configure_channel` / `configure_timebase` / `configure_edge_trigger` | Setup; returns the values the scope reads back. The edge trigger takes an analog channel or a digital channel D0–D15 | writes |
-| `clear_measurements` | Empty the on-screen measurement list | writes |
+| `clear_measurements` | Empty the on-screen measurement list (`:MEASure:CLEar`; `:MEASure:DELete` on an MHO900) | writes |
 | `reset_measurement_statistics` | Restart every item's statistics (`:MEASure:STATistic:RESet`) | writes |
-| `configure_logic_analyzer` | Logic analyser on/off, show/hide D0–D15, pod thresholds (DHO900) | writes |
+| `configure_logic_analyzer` | Logic analyser on/off, show/hide D0–D15, pod thresholds (DHO900, MHO900) | writes |
 | `configure_generator` | Waveform, frequency, amplitude, offset (output stays off) | writes |
 | `generator_output_on` / `generator_output_off` | Drive or stop the signal | writes |
 
@@ -170,17 +189,19 @@ Every tool's description names the SCPI command it sends, in Programming Guide t
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `RIGOL_HOST` | *(required)* | Instrument address |
-| `RIGOL_FAMILY` | `dp800` | `dp800` or `dho900`; checked against `*IDN?` on connect |
+| `RIGOL_FAMILY` | `dp800` | `dp800`, `dho900` or `mho900`; checked against `*IDN?` on connect |
 | `RIGOL_PORT` | `5555` | Raw SCPI socket |
 | `RIGOL_TIMEOUT_MS` | `5000` | Read timeout |
 | `RIGOL_ALLOW_WRITES` | `false` | `true`, `1` or `yes` (any case) enables mutating tools; a value outside true/false, 1/0, yes/no stops startup |
 | `RIGOL_CH<n>_MAX_VOLTS` / `_MAX_AMPS` | channel rating | PSU ceiling, `n` = 1–3, set together; finite and above 0 |
-| `RIGOL_GEN_MAX_VPP` / `RIGOL_GEN_MAX_PEAK_VOLTS` | 10 / 5 | Scope generator ceilings, set together |
+| `RIGOL_GEN_MAX_VPP` / `RIGOL_GEN_MAX_PEAK_VOLTS` | 10 / 5 (DHO), 20 / 10 (MHO900) | Scope generator ceilings for every generator channel, set together; open-circuit on an MHO900 |
+| `RIGOL_GEN<n>_MAX_VPP` / `_MAX_PEAK_VOLTS` | the above | One MHO900 generator channel's ceilings, `n` = 1 or 2, set together; refused for other families |
 | `RUST_LOG` | `info` | Log filter for stderr; every write and energisation logs at info |
 
 ## The `rigol` library
 
-The [`rigol`](crates/rigol) crate is usable without MCP: `Dp800` and `Dho900` device models,
+The [`rigol`](crates/rigol) crate is usable without MCP: `Dp800` and `Dho900` device models
+(`Dho900::connect_as(…, Family::Mho900)` drives an MHO900),
 the safety ceilings, and a `Session` that frames SCPI over a raw TCP socket (one command in
 flight, binary block reads, reconnect after a failed exchange so a late reply can never be
 paired with the next query). Enable its `schemars` feature for JSON Schema on the parameter
@@ -195,9 +216,10 @@ cargo run -p rigol --example probe -- 192.0.2.20
 ```
 
 The probe is read-only by default. It identifies the instrument; for a scope it prints a table
-of every query the firmware accepts. `--write` adds a fixed list of display, trigger and
+of every query the firmware accepts, and for an MHO900 also reads the waveform the scope is
+already set up to transfer. `--write` adds a fixed list of display, trigger and
 logic-analyser set commands, each read, set, read back and error-checked, then puts every
-setting back. It never touches the signal generator.
+setting back (DHO800/DHO900 only). It never touches the signal generator.
 
 ## Firmware quirks
 
@@ -265,6 +287,53 @@ Measured against a DHO924S on `00.01.05`:
 - **Measurement statistics only grow while the scope triggers.** In `NORMal` sweep with
   nothing triggering, `:MEASure:STATistic:ITEM? CNT,…` stays at 0 after a reset.
 - Latency is 23–55 ms per query on a direct link; a 1024×600 PNG screenshot takes ~300 ms.
+
+### MHO900
+
+Measured against an MHO984 on `00.01.00`, read-only. Every query below answered within
+24–40 ms (the measurement queries in about 130 ms), and none left anything in the error queue:
+
+| Query | Reply |
+|---|---|
+| `*IDN?` | `RIGOL TECHNOLOGIES,MHO984,MHO9XXXXXXXXXX,00.01.00` |
+| `:LAN:STATus?` / `:DHCP?` / `:MAC?` | `CONNECTED` / `1` / `00:19:AF:…` (already upper-case and colon-separated) |
+| `:TRIGger:STATus?` / `:MODE?` / `:SWEep?` | `TD` / `EDGE` / `AUTO` |
+| `:TRIGger:EDGE:SOURce?` / `:SLOPe?` / `:LEVel?` | `CHAN1` / `POS` / `1.516530E-1` |
+| `:TIMebase:MAIN:SCALe?` / `:OFFSet?` | `2.000000E-4` / `0.000000` |
+| `:ACQuire:SRATe?` / `:MDEPth?` / `:TYPE?` / `:BITS?` | `5.000000E+6` / `1.0000E+04` / `NORM` / `14` |
+| `:CHANnel1:SCALe?` / `:OFFSet?` / `:PROBe?` | `5.000000E-02` / `-1.556530E-01` / `1.000000E0` |
+| `:CHANnel1:COUPling?` / `:BWLimit?` / `:INVert?` | `DC` / `OFF` / `0` |
+| `:CHANnel1:IMPedance?` | `OMEG` |
+| `:MEASure:ITEM? VPP,CHANnel1` | `3.1580E-01` |
+| `:MEASure:STATistic:ITEM? CNT,VPP,CHANnel1` | `1.3000E+01` |
+| `:WAVeform:SOURce?` / `:MODE?` / `:FORMat?` / `:POINts?` | `CHAN1` / `NORM` / `WORD` / `1000` |
+| `:WAVeform:PREamble?` | `1,0,1000,1,2.000000E-6,-1.000000E-3,0.000000,6.6667E-06,-23347,32768` |
+| `:LA:ENABle?` / `:LA:POD1:THReshold?` | `0` / `0.000000` |
+| `:SYSTem:OPTion:STATus? AFG100` / `AFG50` / `BND` | `0` / `0` / `0` |
+| `:DISPlay:DATA? PNG` | a 1024×600 PNG of about 100 kB, in about 400 ms |
+
+Where it differs from the DHO900, from the MHO900 Programming Guide:
+
+- **Inputs are 1 MΩ or 50 Ω** (`:CHANnel<n>:IMPedance`, 3.6.7). The vertical scale range
+  follows it (3.6.8): 1 mV to 10 V per division at 1 MΩ, 200 µV to 1 V at 50 Ω. The library
+  reads the impedance before checking a new scale. There is no tool that changes the
+  impedance, and a 50 Ω input is rated for 5 Vrms.
+- **Probe ratios add 15, 150, 1500 and 15000** (3.6.9).
+- **There is no `:MEASure:CLEar`**; the guide's command for it is `:MEASure:DELete`
+  (3.17.3).
+- **The generator is optional and has two channels** (3.25). Commands are `:SOURce1` and
+  `:SOURce2`, not `:SOURce`. Option MHO900-AFG100 (or the BND bundle) gives sine to 100 MHz,
+  square to 20 MHz and ramp to 2 MHz; MHO900-AFG50 halves those and starts at 20 mHz. Amplitude
+  is 20 Vpp open-circuit up to 50 MHz and 10 Vpp above, and the offset range shrinks as the
+  amplitude grows, so the excursion stays within half of that.
+- **The logic analyser and the measurement, waveform, trigger, timebase and LAN queries match
+  the DHO900 spelling for spelling.** Waveform data is 12-bit, delivered as `WORD` with the same
+  scaling: 7500 codes per division, `(raw − yorigin − yreference) × yincrement`, so 0 V on the
+  reading above is raw 9421.
+- **Logic-analyser thresholds are unconfirmed.** At 0 V they read back `0.000000`, which
+  cannot show whether the DHO's volts × 10¹⁸ reply applies here too; the guide's example is
+  `3.3E+00`. The library accepts either form.
+- `:MEASure:ITEM?` adds the item to the on-screen measurement list, as on the DHO.
 
 ## Contributing
 
